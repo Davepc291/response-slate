@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"greenwich-fire-responder/backend/internal/audioanalysis"
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/recordings"
 )
@@ -27,6 +28,7 @@ func TestLoad(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.want.Recordings = recordings.DefaultOptions()
+			tc.want.Audio = audioanalysis.DefaultOptions()
 			t.Setenv("GFR_HTTP_ADDR", tc.addr)
 			t.Setenv("GFR_DATABASE_URL", tc.url)
 			t.Setenv("GFR_DATABASE_REQUIRED", tc.required)
@@ -66,8 +68,32 @@ func TestLoadDoesNotReadDotEnv(t *testing.T) {
 func clearRecordingEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"GFR_RECORDINGS_DIR", "GFR_RECORDING_TIMEZONE", "GFR_RECORDING_POLL_INTERVAL",
-		"GFR_RECORDING_STABLE_FOR", "GFR_RECORDING_MAX_WAIT", "GFR_RECORDING_RETRY_INTERVAL", "GFR_RECORDING_MAX_ATTEMPTS"} {
+		"GFR_RECORDING_STABLE_FOR", "GFR_RECORDING_MAX_WAIT", "GFR_RECORDING_RETRY_INTERVAL", "GFR_RECORDING_MAX_ATTEMPTS",
+		"GFR_FFPROBE_PATH", "GFR_FFMPEG_PATH", "GFR_AUDIO_TIMEOUT", "GFR_AUDIO_MAX_DURATION", "GFR_AUDIO_MAX_ATTEMPTS", "GFR_AUDIO_RETRY_INTERVAL"} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestAudioConfiguration(t *testing.T) {
+	clearRecordingEnv(t)
+	t.Setenv("GFR_DATABASE_REQUIRED", "false")
+	t.Setenv("GFR_FFPROBE_PATH", `C:\tools\ffprobe.exe`)
+	t.Setenv("GFR_FFMPEG_PATH", `C:\tools\ffmpeg.exe`)
+	t.Setenv("GFR_AUDIO_TIMEOUT", "20s")
+	t.Setenv("GFR_AUDIO_MAX_DURATION", "5m")
+	t.Setenv("GFR_AUDIO_MAX_ATTEMPTS", "2")
+	t.Setenv("GFR_AUDIO_RETRY_INTERVAL", "1s")
+	cfg, err := config.Load()
+	if err != nil || cfg.Audio.Timeout != 20*time.Second || cfg.Audio.MaxDuration != 5*time.Minute || cfg.Audio.MaxAttempts != 2 || cfg.Audio.FFprobePath != `C:\tools\ffprobe.exe` {
+		t.Fatal("audio overrides not loaded")
+	}
+	for name, value := range map[string]string{"GFR_AUDIO_TIMEOUT": "0s", "GFR_AUDIO_MAX_DURATION": "2h", "GFR_AUDIO_MAX_ATTEMPTS": "0", "GFR_AUDIO_RETRY_INTERVAL": "bad-secret"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			if _, err := config.Load(); err == nil {
+				t.Fatal("invalid option accepted")
+			}
+		})
 	}
 }
 

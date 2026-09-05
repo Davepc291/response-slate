@@ -110,12 +110,13 @@ to resume. The service uses `restart: unless-stopped`.
 Use `C:\Users\User\SDRTrunk\recordings` as the Windows recordings-directory example.
 The API must be able to list that existing directory and inspect file metadata.
 It must not be a symlink, junction, or another reparse point, and its path must not
-pass through one. The watcher never reads audio bytes or changes source recordings.
+pass through one. Analysis reads a verified read-only handle after ingestion; it
+never changes source recordings.
 
 Before enabling ingestion:
 
 1. Confirm the local PostgreSQL service is healthy using the status command above.
-2. Apply migrations `000001` and `000002` in order if not already applied, and run
+2. Apply migrations `000001`, `000002`, and `000003` in order if not already applied, and run
    their rollback-only SQL tests using [database/README.md](../database/README.md).
    The API does not apply migrations automatically.
 3. Configure `GFR_DATABASE_URL` privately in the API process environment using the
@@ -153,10 +154,10 @@ are ignored. The backend guide shows the exact native filename and parsed fields
 
 New metadata rows are deduplicated by `source_identity`: SHA-256 of the versioned,
 cleaned absolute path, case-folded on Windows. Size/mtime changes do not change
-this identity. `audio_fingerprint` remains reserved for audio-content hashing and
-is NULL for this milestone. A copied recording at a different path has a different
-identity; the same path is not inserted twice. Source files are never renamed or
-moved by ingestion.
+this identity. `audio_fingerprint` is populated only after canonical PCM analysis.
+A copied recording at a different path has a different source identity, but
+identical decoded audio is linked to one canonical transmission. The same path is
+not inserted twice. Source files are never renamed or moved by ingestion.
 
 Watch the API terminal for structured `recording_ingestion` logs with accepted,
 ignored, duplicate, or failed outcomes and safe reason codes. Logs contain hashed
@@ -166,8 +167,8 @@ limits, and restarting does not replay the directory; review failed observations
 before relying on ingestion. Polling cannot capture files removed between scans,
 and size/mtime stability is a heuristic rather than a recorder completion signal.
 
-This foundation stores metadata only in shadow mode with no CAD authority. It
-performs no audio normalization, transcription, classification, incident creation,
+This foundation stores metadata and audio measurements in shadow mode with no CAD
+authority. It performs no transcription, classification, incident creation,
 unit-status updates, or WebSocket/CAD publication. Secrets and recordings must
 never be committed to Git. Automated watcher tests use temporary synthetic files;
 do not use a live recordings directory as a test fixture.
@@ -175,7 +176,57 @@ do not use a live recordings directory as a test fixture.
 From `backend/`, verify the code with:
 
 ```powershell
-gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings
+gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis
 go vet ./...
 go test ./...
 ```
+
+## Audio tools and controlled integration verification
+
+The audio stage needs FFprobe and FFmpeg. Defaults are `ffprobe` and `ffmpeg` on
+PATH. If an already-running terminal has a stale PATH, restart it or set
+`GFR_FFPROBE_PATH` and `GFR_FFMPEG_PATH` to the installed executables explicitly.
+No shell interprets media-tool arguments, and the API does not automatically load
+`.env` or pass database settings to those subprocesses.
+
+Defaults: `GFR_AUDIO_TIMEOUT=30s` per probe/decode attempt,
+`GFR_AUDIO_MAX_DURATION=10m`, `GFR_AUDIO_MAX_ATTEMPTS=3`, and
+`GFR_AUDIO_RETRY_INTERVAL=2s`. See the backend guide for validation bounds and
+supported codecs. Missing tools fail analysis safely without taking down HTTP.
+
+Output PCM is streamed as signed 16-bit little-endian, mono, 16 kHz; no normalized
+file is created. The fingerprint is `pcm-s16le-16000-mono-v1:sha256:<hex>` over those
+raw bytes. Duration is rounded from decoded sample count to nearest millisecond,
+ties up. RMS/peak use a 32768 full-scale divisor. Pin consistent decoder builds:
+changing canonical decoding can change hashes even when a recording sounds alike.
+
+The normal Go suite does not need installed media tools. Keep real-tool verification
+separate and confined to the local development database:
+
+1. Confirm PostgreSQL health and migrations; record the source file's SHA-256,
+   size, and modification time without altering it.
+2. Create a new empty temporary directory and point `GFR_RECORDINGS_DIR` there.
+   Set database credentials privately in memory/process environment and start the
+   API temporarily. Confirm health/readiness before adding a recording.
+3. Copy
+   `C:\Users\User\SDRTrunk\recordings\20260905_081609Greenwich_Fairfield_T-NEW_GFD1__TO_57201_FROM_578060.mp3`
+   into that temporary directory. Never modify or move the original.
+4. Wait for `completed` analysis and verify `audio_probe`, `duration_ms`, `rms`,
+   `peak`, and the canonical fingerprint. For an independent check, decode only
+   the temporary copy with the same canonical settings and measure/hash its stream.
+5. Add a second temporary copy with a distinct valid native filename. Verify a
+   `skipped` alias points to the first canonical row and only one fingerprint owner
+   exists. Verify safe `analyzed` and `duplicate-content` logs.
+6. Stop the temporary API and confirm its listener and media children are gone.
+   Remove only that test's alias row before its canonical row, each selected by the
+   captured ID and exact source identity/path. Never delete a pre-existing canonical
+   row. Remove only the temporary copies and their empty directory.
+7. Confirm the original hash, size, and modification time are unchanged; run the Go
+   tests again. Never commit recordings, temporary PCM, credentials, or backups.
+
+Analysis claims and retries are persisted, but no durable lease recovery or startup
+replay is implemented. A crash or database outage can leave work requiring review.
+The worker is serial, so slow analysis delays subsequent directory scans while the
+HTTP API remains responsive. Content aliases must not be counted as extra logical
+transmissions. No Whisper, classification, status changes, incidents, or CAD writes
+are performed.

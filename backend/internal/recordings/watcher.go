@@ -14,6 +14,11 @@ type Store interface {
 	InsertRecording(context.Context, Recording) (bool, error)
 }
 
+// Processor receives only a verified read-only handle, never opens a source path.
+type Processor interface {
+	Process(context.Context, Recording, *os.File)
+}
+
 type observation struct {
 	first, stableSince, nextAttempt time.Time
 	info                            os.FileInfo
@@ -24,16 +29,17 @@ type observation struct {
 // Watcher uses reconciliation polling, so correctness does not depend on OS
 // notification delivery. All state belongs to its single Run goroutine.
 type Watcher struct {
-	options  Options
-	root     *os.Root
-	path     string
-	location *time.Location
-	store    Store
-	logger   *slog.Logger
-	seen     map[string]*observation
+	options   Options
+	root      *os.Root
+	path      string
+	location  *time.Location
+	store     Store
+	logger    *slog.Logger
+	seen      map[string]*observation
+	processor Processor
 }
 
-func NewWatcher(options Options, store Store, logger *slog.Logger) (*Watcher, error) {
+func NewWatcher(options Options, store Store, logger *slog.Logger, processors ...Processor) (*Watcher, error) {
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
@@ -70,6 +76,9 @@ func NewWatcher(options Options, store Store, logger *slog.Logger) (*Watcher, er
 	location, _ := time.LoadLocation(options.Timezone)
 	w := &Watcher{options: options, root: root, path: path, location: location,
 		store: store, logger: logger, seen: make(map[string]*observation)}
+	if len(processors) > 0 {
+		w.processor = processors[0]
+	}
 	names, err := w.names()
 	if err != nil {
 		root.Close()
@@ -188,6 +197,23 @@ func (w *Watcher) scan(ctx context.Context, now time.Time) {
 			w.log(name, "accepted", "metadata_stored")
 		} else {
 			w.log(name, "duplicate", "source_identity_exists")
+		}
+		if w.processor != nil {
+			input, err := w.root.Open(name)
+			if err != nil {
+				w.processor.Process(ctx, r, nil)
+				continue
+			}
+			opened, statErr := input.Stat()
+			current, linkErr := w.root.Lstat(name)
+			if statErr != nil || linkErr != nil || isLink(current) || !opened.Mode().IsRegular() ||
+				!os.SameFile(info, opened) || !os.SameFile(current, opened) || opened.Size() != info.Size() || !opened.ModTime().Equal(info.ModTime()) {
+				input.Close()
+				w.processor.Process(ctx, r, nil)
+				continue
+			}
+			w.processor.Process(ctx, r, input)
+			input.Close()
 		}
 	}
 	// Forget vanished names, keeping memory proportional to the directory size.

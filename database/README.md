@@ -3,8 +3,9 @@
 This directory contains PostgreSQL migrations and SQL tests for the local Docker
 development database in this repository's `greenwich-fire-responder` Compose
 project. This milestone stores radio metadata and immutable shadow unit-status
-decisions only. Migration `000002` adds metadata-only recording ingestion support.
-The Go API can insert recording metadata; neither migration creates incidents or
+decisions, plus audio-analysis measurements. Migration `000002` adds recording
+ingestion; `000003` adds analysis bookkeeping and content deduplication.
+The Go API inserts metadata and analyzes audio; these migrations create no incidents or
 current board state.
 
 ## Schema
@@ -120,13 +121,65 @@ Windows case-sensitive paths differing only in case are treated as the same iden
 The watcher never moves recordings itself.
 
 `audio_fingerprint` is now nullable and remains reserved for audio-content hashing.
-It stays NULL until a later milestone actually inspects audio content. The schema
+It stays NULL until the audio-analysis stage inspects audio content. The schema
 requires at least one of `audio_fingerprint` or `source_identity`, and requires
 complete source metadata when `source_identity` is supplied. Existing content-hash
 rows and their uniqueness constraint remain valid. No audio bytes, transcript,
 duration, RMS, or peak are populated by this ingestion milestone. The two processing
 status columns retain their `pending` defaults. RID values are stored without
 inferring a unit; no status decisions, incidents, or CAD actions are created.
+
+## Migration 000003: audio analysis
+
+Apply once after `000002`, only to the verified local development container:
+
+```powershell
+Get-Content -Raw -LiteralPath database/migrations/000003_audio_analysis.sql | docker exec -i greenwich-fire-responder-postgres-1 sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000003 failed.' }
+```
+
+The transaction adds `audio_probe` (allowlisted JSON technical metadata),
+`analysis_attempts`, `analysis_retryable`, and `audio_duplicate_of` (a foreign key
+to the canonical transmission). It records version `000003`; it does not rewrite
+earlier migrations or existing fingerprints.
+
+Analysis claims atomically change eligible `pending`/retryable `failed` rows to
+`processing` and increment the persisted attempt counter. Already claimed or final
+rows cannot be claimed again. Successful results are committed through
+`complete_audio_analysis(...)`, a function invoked in a single transaction:
+
+1. Validate the versioned fingerprint and measurement ranges.
+2. Acquire a transaction-scoped advisory lock derived from the fingerprint, then
+   lock the source transmission row. Concurrent calls for identical fingerprints
+   serialize; unrelated hash collisions only cause extra serialization.
+3. If there is no fingerprint owner, atomically set duration, RMS, peak, probe,
+   fingerprint, and `completed` state on the source row.
+4. If a canonical owner exists, retain the second path as a metadata alias, set
+   `audio_duplicate_of` to that owner, store its measurements/probe, and mark it
+   `skipped`. Its own fingerprint stays NULL to preserve the original unique
+   constraint. Repeated completion calls return `already-processed`.
+
+Count logical transmissions using `audio_duplicate_of IS NULL`; alias rows preserve
+source-path idempotency and must not be published as additional transmissions.
+The canonical owner cannot be deleted while aliases reference it. This stage never
+deletes source rows or changes the immutable status-decision audit. The function
+is the application write path; direct writers must also honor this protocol.
+
+Fingerprint format is `pcm-s16le-16000-mono-v1:sha256:` followed by 64 lowercase hex
+characters for SHA-256 over raw signed 16-bit little-endian, mono, 16 kHz decoded
+PCM. Duration is decoded sample count / 16,000 rounded to nearest millisecond, ties
+up. RMS/peak are linear values normalized by 32768. `audio_probe` contains source
+format/codec/rate/channels and optional reported duration, not raw probe output,
+filenames, tags, or credentials. Decoder changes may alter exact bytes; keep builds
+consistent and introduce a new prefix when changing canonical rules.
+
+Invalid audio uses `failed` with `analysis_retryable=false`. Retryable tool/source
+failures use `failed` with a safe code and bounded attempts. A failed database
+commit may have an uncertain result: failure updates target only `processing` rows,
+so they cannot overwrite committed success. Retry claims and fingerprint uniqueness
+preserve idempotency. A lost claim response or process crash may leave a `processing`
+row requiring review; there is no automatic historical replay or lease recovery.
+Transcription status remains `pending`, and no classification is performed.
 
 ## Run schema tests
 
@@ -154,5 +207,16 @@ handling, source identity validation, required metadata, positive file size,
 supported extensions, and compatibility with content-fingerprint inserts. Success
 prints `ALL INGESTION SCHEMA TESTS PASSED` and ends with `ROLLBACK`. Its synthetic
 rows do not remain in the database. The original `000001` test remains applicable.
+
+After `000003`, also run its transactional test:
+
+```powershell
+Get-Content -Raw -LiteralPath database/tests/000003_schema_test.sql | docker exec -i greenwich-fire-responder-postgres-1 sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Audio-analysis schema tests failed.' }
+```
+
+Success prints `ALL AUDIO ANALYSIS SCHEMA TESTS PASSED` and ends with `ROLLBACK`.
+The tests cover atomic completion, claim limits, retry safety, duplicate aliases,
+canonical uniqueness, and measurement constraints. All fixtures are synthetic.
 
 Secrets, recordings, and database backups must never be committed to Git.

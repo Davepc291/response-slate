@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"greenwich-fire-responder/backend/internal/audioanalysis"
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/database"
 	"greenwich-fire-responder/backend/internal/httpapi"
@@ -41,10 +42,12 @@ func run() error {
 	ingestionCtx, cancelIngestion := context.WithCancel(ctx)
 	ingestionDone := make(chan struct{})
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	processor := &audioanalysis.Processor{Options: cfg.Audio,
+		Analyzer: audioanalysis.Analyzer{Options: cfg.Audio, Tools: audioanalysis.ProcessTools{}}, Store: db, Logger: logger}
 	if cfg.Recordings.Directory == "" {
 		logger.Info("recording_ingestion", "outcome", "disabled", "reason", "directory_unconfigured")
 		close(ingestionDone)
-	} else if watcher, err := recordings.NewWatcher(cfg.Recordings, db, logger); err != nil {
+	} else if watcher, err := recordings.NewWatcher(cfg.Recordings, db, logger, processor); err != nil {
 		// A filesystem/configuration failure must not take down the HTTP API.
 		logger.Error("recording_ingestion", "outcome", "failed", "reason", "watcher_start_failed")
 		close(ingestionDone)

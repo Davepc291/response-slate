@@ -71,12 +71,12 @@ go run ./cmd/api
 `sslmode=disable` is for the local loopback development database. Use appropriate
 TLS settings for remote connections. Never commit credentials or recordings.
 The API checks connectivity and, when explicitly configured, ingests recording
-metadata. It does not run migrations or write incident, unit-status, or board
+metadata and performs audio analysis. It does not run migrations or write incident, unit-status, or board
 state. No Docker API service is included.
 
 ## SDRTrunk recording ingestion
 
-Apply migration `000002` after `000001` using the local commands in
+Apply migrations `000001`, `000002`, and `000003` in order using the local commands in
 `../database/README.md` before enabling ingestion. Configure the database through
 the process environment as described above. Then, from `backend/`, explicitly set:
 
@@ -110,8 +110,9 @@ configuration validation with safe errors. Timezone data is embedded for Windows
 The watcher takes a synchronous startup snapshot and ignores all names in that
 snapshot, even if those files are subsequently modified. Only names first observed
 after this boundary are candidates. Periodic polling is also reconciliation; it
-does not depend on filesystem notifications. It never reads audio bytes or modifies,
-renames, moves, or deletes recordings. It rejects directories, nonregular files,
+does not depend on filesystem notifications. Metadata ingestion does not read audio;
+the analysis stage receives a verified read-only handle afterward. Neither stage
+modifies, renames, moves, or deletes recordings. It rejects directories, nonregular files,
 symlinks, and Windows reparse points, including linked directory path components.
 Directory access is anchored through `os.Root`.
 
@@ -153,10 +154,10 @@ and modification time are deliberately excluded so growth or retries do not crea
 new identities. PostgreSQL enforces uniqueness, and inserts use
 `ON CONFLICT (source_identity) DO NOTHING`.
 
-`audio_fingerprint` remains reserved for audio-content hashing and is NULL for
-these metadata-only rows. Parsed fields, source path, observed size, and modification
-time are persisted. Audio measurements, duration, and transcript remain unset;
-processing and transcription statuses remain `pending` for future milestones.
+`audio_fingerprint` remains reserved for audio-content hashing and is NULL at initial
+metadata insertion. Parsed fields, source path, observed size, and modification time
+are persisted first. The analysis stage then fills duration and audio measurements.
+Transcription stays `pending`, and transcript remains unset.
 
 Structured JSON logs use `recording_ingestion`, a hashed recording ID, an outcome
 (`accepted`, `ignored`, `duplicate`, or `failed`), and a fixed reason. Startup also
@@ -179,15 +180,99 @@ and joins the watcher before closing the connection pool.
   attempt/deadline limit, and restarting does not replay files already present.
   Operators must review failures; automatic historical recovery is not included.
 - Moving/copying a recording to another path creates a different source identity.
-  Reusing the same path collides intentionally; content-level deduplication is
-  deferred. Windows case-sensitive directories are not distinguished by case.
+  Reusing the same path collides intentionally. Audio analysis links identical
+  canonical content to one transmission while preserving the additional path as
+  an alias row. Windows case-sensitive directories are not distinguished by case.
 - Completed/ignored names are remembered while present. If a name disappears and
   later reappears, it is reconsidered; database identity still prevents reinsertion
   of a previously stored path. Memory use scales with directory entries.
 
-This remains shadow mode with no CAD authority. The watcher runs no FFmpeg,
-Whisper, classification, incident creation, status updates, WebSockets, or CAD
-actions. Secrets and recordings must never be committed to Git.
+This remains shadow mode with no CAD authority. It runs no Whisper, classification,
+incident creation, status updates, WebSockets, or CAD actions. Secrets and recordings
+must never be committed to Git.
+
+## Audio-analysis foundation
+
+FFprobe validates accepted stable recordings, then FFmpeg decodes them for streaming
+measurement. Install both tools or configure their explicit executable paths.
+They are invoked directly with `exec.CommandContext`, never through a shell.
+Neither tool runs when `GFR_RECORDINGS_DIR` is empty.
+
+| Variable | Default | Allowed range / purpose |
+| --- | --- | --- |
+| `GFR_FFPROBE_PATH` | `ffprobe` | Executable name on PATH or explicit path |
+| `GFR_FFMPEG_PATH` | `ffmpeg` | Executable name on PATH or explicit path |
+| `GFR_AUDIO_TIMEOUT` | `30s` | 1s–5m; shared deadline for probe and decode per attempt |
+| `GFR_AUDIO_MAX_DURATION` | `10m` | 1s–1h; upper bound on reported duration and decoded samples |
+| `GFR_AUDIO_MAX_ATTEMPTS` | `3` | 1–10; bounded attempts, also counted in PostgreSQL |
+| `GFR_AUDIO_RETRY_INTERVAL` | `2s` | 10ms–1m; cancellation-aware delay between attempts |
+
+FFprobe JSON must describe exactly one usable audio stream, with no additional
+video or other streams. Actual detected formats must be MP3 with MP3 audio, or WAV
+with supported PCM (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`,
+or `pcm_f64le`). Sample rates must be 8–192 kHz and channel counts 1–8. Extension
+alone is not proof of valid audio. Corrupt, empty, unsupported, multiple-stream,
+video-only, and excessive-duration inputs fail safely.
+
+Only allowlisted probe fields are stored in `audio_probe`: format, codec, source
+sample rate/channel count, and reported duration when available. Pipe input may
+not report duration. Stored `duration_ms` is authoritative decoded sample count
+divided by 16,000, rounded to the nearest millisecond with half milliseconds rounded
+up; it may differ from a container's duration estimate or encoder padding.
+
+Canonical output is raw signed 16-bit little-endian PCM, mono, 16,000 Hz, without a
+container header. `audio_fingerprint` uses this versioned format:
+
+```text
+pcm-s16le-16000-mono-v1:sha256:<64 lowercase hex characters>
+```
+
+The digest covers every decoded PCM byte, in order. Peak is the maximum absolute
+sample amplitude divided by 32768; RMS is the square root of the mean squared
+normalized amplitudes. Thus -32768 is exactly 1.0, while +32767 is 32767/32768.
+Hashing and measurement work across arbitrary output chunks without retaining PCM.
+Decoded bytes are limited to the configured duration at 32,000 bytes/second.
+
+The fingerprint represents exact decoded bytes, not perceptual similarity. Changes
+to resampling/downmix behavior or FFmpeg versions can change those bytes. Keep the
+decoder build consistent across producers; changing the canonical rules requires
+a new version prefix and an explicit compatibility/reanalysis decision. No existing
+fingerprints are silently rewritten.
+
+### Execution safety and state
+
+After metadata insertion, the watcher opens the file read-only beneath its anchored
+directory, checks identity/size/mtime and link safety, and passes that handle to the
+processor. The source is checked again around analysis. FFprobe/FFmpeg read `pipe:0`;
+they receive neither a source pathname nor database credentials. Protocol access is
+restricted to `pipe`, and input demuxers to MP3/WAV. Decoded stdout is streamed, never
+written beside the recording. FFprobe stdout is bounded to 64 KiB; stderr is capped
+at 16 KiB and excess is drained/discarded. Raw stderr is never logged or stored.
+Child environment contains only platform execution variables, excluding database
+settings and `FFREPORT`. Context cancellation kills/reaps the direct tool process;
+Windows child windows are hidden. Individual FFmpeg allocations are capped at 64 MiB.
+
+| Outcome | Database state | Logging / retry behavior |
+| --- | --- | --- |
+| Claimed | `processing`, increment `analysis_attempts` | One worker may claim an eligible row |
+| Analyzed | `completed`, measurements/probe/fingerprint committed atomically | `analyzed`; no retry |
+| Invalid audio | `failed`, `analysis_retryable=false`, safe error code | `invalid`; no retry |
+| Tool unavailable, timeout, source changed, transient failure | `failed` with safe error code | `failed`; retry within attempt cap, then stop |
+| Identical content at another path | `skipped`, `audio_duplicate_of` points to canonical row | `duplicate-content`; no retry |
+
+Duplicate path rows remain metadata aliases, not another logical transmission.
+Their fingerprint stays NULL to preserve uniqueness; measurements and probe fields
+are retained. Use `audio_duplicate_of IS NULL` when counting logical transmissions.
+See `../database/README.md` for the transactional fingerprint-locking strategy.
+
+Analysis is serial within the watcher, so a long recording delays later scans but
+does not block HTTP handlers. Shutdown cancels analysis, records a safe failure when
+possible, joins the watcher, and then closes the database pool. If PostgreSQL cannot
+persist a failure, only a safe failure log is possible. A process crash or ambiguous
+claim response may leave `processing` rows requiring operator review; this is not a
+durable background queue and does not replay historical recordings after restart.
+Size/mtime checks remain a stability heuristic, not protection against all concurrent
+writer behavior. Native decoder memory is not isolated by an OS sandbox.
 
 ## Health endpoint
 
@@ -224,7 +309,7 @@ Readiness checks connectivity, not migration version or application data.
 Run from `backend/`:
 
 ```sh
-gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings
+gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis
 go vet ./...
 go test ./...
 ```
@@ -239,6 +324,13 @@ cancellation, and file safety with temporary synthetic fixtures. Creating real
 symlinks requires OS permission; that test reports a skip when unavailable, while
 the Windows reparse-attribute test remains independent of symlink privileges.
 
+Audio unit tests use fake tools and the Go test executable as a helper process;
+they do not require installed FFmpeg. They cover probe validation, canonical SHA-256,
+PCM edge cases, chunk boundaries, bounded output, timeouts/cancellation, missing
+executables, sanitized environment/errors, persistence outcomes, and shutdown.
+Real-tool verification is a separate controlled local integration exercise described
+in `../docs/development.md`.
+
 ## Layout
 
 - `cmd/api/main.go`: configuration, HTTP server lifecycle, and graceful shutdown.
@@ -247,5 +339,7 @@ the Windows reparse-attribute test remains independent of symlink privileges.
 - `internal/httpapi/`: routing, liveness/readiness handlers, and HTTP tests.
 - `internal/recordings/`: metadata parser, polling watcher, path identity, platform
   safety checks, and tests behind a small `Store` interface.
+- `internal/audioanalysis/`: tool execution, probe parsing, streaming PCM analysis,
+  bounded retry orchestration, and unit tests behind small tool/store interfaces.
 
 The Angular application remains in `../web/` and runs separately.
