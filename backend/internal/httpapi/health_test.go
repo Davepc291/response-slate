@@ -13,7 +13,7 @@ import (
 func TestHealth(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-	httpapi.NewHandler().ServeHTTP(recorder, request)
+	httpapi.NewHandler(nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
@@ -37,7 +37,7 @@ func TestHealth(t *testing.T) {
 func TestHealthRejectsPost(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/health", nil)
-	httpapi.NewHandler().ServeHTTP(recorder, request)
+	httpapi.NewHandler(nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", recorder.Code, http.StatusMethodNotAllowed)
@@ -47,7 +47,7 @@ func TestHealthRejectsPost(t *testing.T) {
 func TestUnknownRoute(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/unknown", nil)
-	httpapi.NewHandler().ServeHTTP(recorder, request)
+	httpapi.NewHandler(nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", recorder.Code, http.StatusNotFound)

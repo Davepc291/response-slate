@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"greenwich-fire-responder/backend/internal/config"
+	"greenwich-fire-responder/backend/internal/database"
 	"greenwich-fire-responder/backend/internal/httpapi"
 )
 
@@ -20,17 +22,23 @@ func main() {
 }
 
 func run() error {
-	addr := os.Getenv("GFR_HTTP_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8080"
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	db, err := database.Open(ctx, cfg.DatabaseURL, cfg.DatabaseRequired)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
 	server := &http.Server{
-		Addr:              addr,
-		Handler:           httpapi.NewHandler(),
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpapi.NewHandler(db),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -39,7 +47,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("starting greenwich-fire-responder-api on %s", addr)
+		log.Printf("starting greenwich-fire-responder-api on %s", cfg.HTTPAddr)
 		serveErr <- server.ListenAndServe()
 	}()
 

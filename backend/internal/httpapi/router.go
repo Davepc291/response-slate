@@ -4,8 +4,9 @@ package httpapi
 import "net/http"
 
 // NewHandler builds an independent HTTP handler for the API.
-func NewHandler() http.Handler {
+func NewHandler(db DatabaseChecker) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", health)
+	mux.HandleFunc("GET /api/ready", ready(db))
 	return mux
 }
