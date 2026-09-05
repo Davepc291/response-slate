@@ -1,0 +1,33 @@
+# Local environment and secrets; keep the safe template tracked.
+.env
+.env.*
+!.env.example
+secrets/
+.secrets/
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Local database files and backups.
+postgres_data/
+pgdata/
+data/
+backups/
+*.dump
+*.backup
+*.sql.gz
+
+# Logs and temporary files.
+logs/
+*.log
+tmp/
+temp/
+.tmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
