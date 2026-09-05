@@ -4,11 +4,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"greenwich-fire-responder/backend/internal/config"
+	"greenwich-fire-responder/backend/internal/recordings"
 )
 
 func TestLoad(t *testing.T) {
+	clearRecordingEnv(t)
 	for _, tc := range []struct {
 		name, addr, url, required string
 		want                      config.Config
@@ -23,6 +26,7 @@ func TestLoad(t *testing.T) {
 		{name: "invalid boolean is safe", required: "secret-value", wantErr: "GFR_DATABASE_REQUIRED must be a boolean"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			tc.want.Recordings = recordings.DefaultOptions()
 			t.Setenv("GFR_HTTP_ADDR", tc.addr)
 			t.Setenv("GFR_DATABASE_URL", tc.url)
 			t.Setenv("GFR_DATABASE_REQUIRED", tc.required)
@@ -44,6 +48,7 @@ func TestLoad(t *testing.T) {
 }
 
 func TestLoadDoesNotReadDotEnv(t *testing.T) {
+	clearRecordingEnv(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GFR_DATABASE_REQUIRED=true\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -55,5 +60,39 @@ func TestLoadDoesNotReadDotEnv(t *testing.T) {
 	cfg, err := config.Load()
 	if err != nil || cfg.DatabaseRequired || cfg.DatabaseURL != "" {
 		t.Fatal("Load must use only the process environment")
+	}
+}
+
+func clearRecordingEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"GFR_RECORDINGS_DIR", "GFR_RECORDING_TIMEZONE", "GFR_RECORDING_POLL_INTERVAL",
+		"GFR_RECORDING_STABLE_FOR", "GFR_RECORDING_MAX_WAIT", "GFR_RECORDING_RETRY_INTERVAL", "GFR_RECORDING_MAX_ATTEMPTS"} {
+		t.Setenv(name, "")
+	}
+}
+
+func TestRecordingConfiguration(t *testing.T) {
+	clearRecordingEnv(t)
+	t.Setenv("GFR_DATABASE_REQUIRED", "false")
+	t.Setenv("GFR_RECORDINGS_DIR", `C:\Users\User\SDRTrunk\recordings`)
+	t.Setenv("GFR_RECORDING_TIMEZONE", "UTC")
+	t.Setenv("GFR_RECORDING_STABLE_FOR", "4s")
+	t.Setenv("GFR_RECORDING_MAX_ATTEMPTS", "4")
+	cfg, err := config.Load()
+	if err != nil || cfg.Recordings.Directory != `C:\Users\User\SDRTrunk\recordings` ||
+		cfg.Recordings.Timezone != "UTC" || cfg.Recordings.StableFor != 4*time.Second || cfg.Recordings.MaxAttempts != 4 {
+		t.Fatal("recording overrides were not loaded")
+	}
+	for name, value := range map[string]string{
+		"GFR_RECORDING_TIMEZONE": "secret-invalid-zone", "GFR_RECORDING_POLL_INTERVAL": "0s",
+		"GFR_RECORDING_STABLE_FOR": "bad-secret", "GFR_RECORDING_MAX_WAIT": "1s",
+		"GFR_RECORDING_RETRY_INTERVAL": "-1s", "GFR_RECORDING_MAX_ATTEMPTS": "1000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			if _, err := config.Load(); err == nil {
+				t.Fatal("invalid watcher setting was accepted")
+			}
+		})
 	}
 }

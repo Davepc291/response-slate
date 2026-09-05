@@ -3,8 +3,9 @@
 This directory contains PostgreSQL migrations and SQL tests for the local Docker
 development database in this repository's `greenwich-fire-responder` Compose
 project. This milestone stores radio metadata and immutable shadow unit-status
-decisions only. It creates no incidents, current board state, or application
-database integration.
+decisions only. Migration `000002` adds metadata-only recording ingestion support.
+The Go API can insert recording metadata; neither migration creates incidents or
+current board state.
 
 ## Schema
 
@@ -16,12 +17,13 @@ database integration.
   there is no volunteer classification in this schema.
 - `radio_identities`: 15 confirmed trusted mappings. RID 577811 is prohibited in
   this reference table, but remains recordable in transmissions.
-- `radio_transmissions`: unique audio fingerprints, source metadata, optional raw
+- `radio_transmissions`: unique audio fingerprints or path-based source identities,
+  source metadata, optional raw
   TGID/RID values, recording time, audio measurements, transcript/model metadata,
   workflow status, and errors. Unknown metadata may be NULL; TGID/RID have no
-  reference-table foreign keys. Fingerprints must be nonblank content-derived
-  identifiers; the ingestion milestone must choose and consistently apply the
-  fingerprint algorithm. No audio is stored in this table.
+  reference-table foreign keys. `audio_fingerprint` remains reserved for nonblank
+  audio-content hashes and is NULL for metadata-only ingestion. No audio is stored
+  in this table.
 - `unit_status_decisions`: append-only decisions referencing transmissions, with
   detected unit, prior/proposed normalized status, phrase, confidence, acceptance
   or rejection reason, classifier version, and creation time. Multiple decisions
@@ -83,6 +85,49 @@ an unmigrated local database. It intentionally fails on existing tables instead
 of masking a mismatched schema. A successful run ends with `INSERT 0 1` and
 `COMMIT`, recording version `000001` atomically with the schema and seeds.
 
+## Migration 000002: recording ingestion
+
+Apply `000002_recording_ingestion.sql` once, after `000001`, to the same verified
+local development container. Do not reapply a migration already recorded in
+`schema_migrations`. This migration is transactional and leaves migration `000001`
+unchanged.
+
+```powershell
+Get-Content -Raw -LiteralPath database/migrations/000002_recording_ingestion.sql | docker exec -i greenwich-fire-responder-postgres-1 sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000002 failed; inspect the error before continuing.' }
+```
+
+Success ends with `INSERT 0 1` and `COMMIT`. The migration adds these columns to
+`radio_transmissions`:
+
+- `source_identity`: unique SHA-256 hex identity for metadata-only ingestion.
+- `source_path`: cleaned absolute source path.
+- `system_site_label`, `alias_channel_label`, and `channel_label`: parsed native
+  labels and the canonical Greenwich channel.
+- `extension` and `recording_timezone`: normalized audio extension and IANA zone.
+- `source_size_bytes` and `source_modified_at`: observed stable file metadata.
+
+The path identity hashes `sdrtrunk-path-v1`, a NUL separator, and the cleaned
+absolute path; Windows paths are lowercased. The filename already includes the
+recording timestamp and radio identifiers. Size and modification time are excluded
+so retries or file growth do not generate new identities. A unique constraint and
+`ON CONFLICT (source_identity) DO NOTHING` make repeated/concurrent ingestion
+idempotent, including retries after an uncertain database response.
+
+This is a source-path identity, not a content hash. Copying or moving a recording to
+another path produces another identity; reusing the same path produces a duplicate.
+Windows case-sensitive paths differing only in case are treated as the same identity.
+The watcher never moves recordings itself.
+
+`audio_fingerprint` is now nullable and remains reserved for audio-content hashing.
+It stays NULL until a later milestone actually inspects audio content. The schema
+requires at least one of `audio_fingerprint` or `source_identity`, and requires
+complete source metadata when `source_identity` is supplied. Existing content-hash
+rows and their uniqueness constraint remain valid. No audio bytes, transcript,
+duration, RMS, or peak are populated by this ingestion milestone. The two processing
+status columns retain their `pending` defaults. RID values are stored without
+inferring a unit; no status decisions, incidents, or CAD actions are created.
+
 ## Run schema tests
 
 ```powershell
@@ -96,5 +141,18 @@ shadow defaults/enforcement, confidence, and audit immutability. Success prints
 `ALL SCHEMA TESTS PASSED` and ends with `ROLLBACK`. Test rows and helper functions
 are rolled back. Identity sequences may advance despite rollback, which is normal;
 tests do not assume contiguous IDs. Fixtures are synthetic text, not recordings.
+
+After migration `000002`, run its transactional schema test as well:
+
+```powershell
+Get-Content -Raw -LiteralPath database/tests/000002_schema_test.sql | docker exec -i greenwich-fire-responder-postgres-1 sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000002 schema tests failed.' }
+```
+
+This checks the version record, native metadata-only insertion, idempotent conflict
+handling, source identity validation, required metadata, positive file size,
+supported extensions, and compatibility with content-fingerprint inserts. Success
+prints `ALL INGESTION SCHEMA TESTS PASSED` and ends with `ROLLBACK`. Its synthetic
+rows do not remain in the database. The original `000001` test remains applicable.
 
 Secrets, recordings, and database backups must never be committed to Git.

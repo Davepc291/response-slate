@@ -1,7 +1,8 @@
 # PostgreSQL development
 
-This Compose project provides PostgreSQL 16 for local development. It does not
-connect the Go backend to the database. Run the commands below in PowerShell
+This Compose project provides PostgreSQL 16 for local development. The Go API runs
+separately on Windows and uses explicitly configured environment variables to
+connect to it. Run the commands below in PowerShell
 from the repository root, with Docker Desktop configured for Linux containers.
 
 ## Configure
@@ -103,3 +104,78 @@ docker compose --env-file .env stop postgres
 
 This preserves the container and database volume. Run the start command again
 to resume. The service uses `restart: unless-stopped`.
+
+## Recording-ingestion development
+
+Use `C:\Users\User\SDRTrunk\recordings` as the Windows recordings-directory example.
+The API must be able to list that existing directory and inspect file metadata.
+It must not be a symlink, junction, or another reparse point, and its path must not
+pass through one. The watcher never reads audio bytes or changes source recordings.
+
+Before enabling ingestion:
+
+1. Confirm the local PostgreSQL service is healthy using the status command above.
+2. Apply migrations `000001` and `000002` in order if not already applied, and run
+   their rollback-only SQL tests using [database/README.md](../database/README.md).
+   The API does not apply migrations automatically.
+3. Configure `GFR_DATABASE_URL` privately in the API process environment using the
+   local database credentials and host port. See [backend/README.md](../backend/README.md)
+   for connection setup. The API does not automatically load `.env`; Compose
+   configuration does not configure a Go process running on Windows.
+4. From the repository root, start the API explicitly:
+
+```powershell
+$env:GFR_DATABASE_REQUIRED = 'true'
+$env:GFR_RECORDINGS_DIR = 'C:\Users\User\SDRTrunk\recordings'
+$env:GFR_RECORDING_TIMEZONE = 'America/New_York'
+Set-Location backend
+go run ./cmd/api
+```
+
+`GFR_DATABASE_REQUIRED=true` ensures startup checks the configured database.
+Press Ctrl+C to stop the API and its watcher; the PostgreSQL service remains
+running. Leaving `GFR_RECORDINGS_DIR` unset or empty disables ingestion while
+keeping the HTTP API available.
+
+Safe defaults in `.env.example` are a 1-second reconciliation interval, 3 seconds
+of stable size/mtime, a 2-minute observation limit, 5 seconds between failed
+database writes, and at most 3 write attempts. The corresponding variables are
+`GFR_RECORDING_POLL_INTERVAL`, `GFR_RECORDING_STABLE_FOR`, `GFR_RECORDING_MAX_WAIT`,
+`GFR_RECORDING_RETRY_INTERVAL`, and `GFR_RECORDING_MAX_ATTEMPTS`. Set overrides
+explicitly in the process environment. The backend guide documents valid bounds.
+
+The watcher snapshots existing filenames at startup and does not replay them,
+including files modified after that snapshot. New files are found through periodic,
+nonrecursive scans of this directory only; filesystem notifications are not needed.
+Only native `.mp3`/`.wav` names for TGIDs 57201 through 57204 are eligible. Extensions
+are case-insensitive; malformed names and `TEST_`, `REPLAY_`, or `demo_` prefixes
+are ignored. The backend guide shows the exact native filename and parsed fields.
+
+New metadata rows are deduplicated by `source_identity`: SHA-256 of the versioned,
+cleaned absolute path, case-folded on Windows. Size/mtime changes do not change
+this identity. `audio_fingerprint` remains reserved for audio-content hashing and
+is NULL for this milestone. A copied recording at a different path has a different
+identity; the same path is not inserted twice. Source files are never renamed or
+moved by ingestion.
+
+Watch the API terminal for structured `recording_ingestion` logs with accepted,
+ignored, duplicate, or failed outcomes and safe reason codes. Logs contain hashed
+recording identifiers instead of raw filenames, paths, or database errors. A
+database write failure does not crash the API. Retries stop at the configured
+limits, and restarting does not replay the directory; review failed observations
+before relying on ingestion. Polling cannot capture files removed between scans,
+and size/mtime stability is a heuristic rather than a recorder completion signal.
+
+This foundation stores metadata only in shadow mode with no CAD authority. It
+performs no audio normalization, transcription, classification, incident creation,
+unit-status updates, or WebSocket/CAD publication. Secrets and recordings must
+never be committed to Git. Automated watcher tests use temporary synthetic files;
+do not use a live recordings directory as a test fixture.
+
+From `backend/`, verify the code with:
+
+```powershell
+gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings
+go vet ./...
+go test ./...
+```

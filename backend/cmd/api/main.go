@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/database"
 	"greenwich-fire-responder/backend/internal/httpapi"
+	"greenwich-fire-responder/backend/internal/recordings"
 )
 
 func main() {
@@ -35,6 +37,27 @@ func run() error {
 		return err
 	}
 	defer db.Close()
+
+	ingestionCtx, cancelIngestion := context.WithCancel(ctx)
+	ingestionDone := make(chan struct{})
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if cfg.Recordings.Directory == "" {
+		logger.Info("recording_ingestion", "outcome", "disabled", "reason", "directory_unconfigured")
+		close(ingestionDone)
+	} else if watcher, err := recordings.NewWatcher(cfg.Recordings, db, logger); err != nil {
+		// A filesystem/configuration failure must not take down the HTTP API.
+		logger.Error("recording_ingestion", "outcome", "failed", "reason", "watcher_start_failed")
+		close(ingestionDone)
+	} else {
+		go func() {
+			defer close(ingestionDone)
+			watcher.Run(ingestionCtx)
+		}()
+	}
+	defer func() {
+		cancelIngestion()
+		<-ingestionDone
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
