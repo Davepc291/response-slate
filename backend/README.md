@@ -1,5 +1,91 @@
 # Greenwich Fire Responder V3 backend
 
+## Optional remote speech-to-text
+
+Apply migration `000004` before enabling transcription. A separate serial worker
+polls successfully analyzed canonical transmissions in `GFR_RECORDINGS_DIR` once
+per second. It never scans other directories or transcribes audio aliases. The
+Windows directory example is `C:\Users\User\SDRTrunk\recordings`. Existing filenames
+are still seeded without ingestion replay; the transcription worker can resume
+already-ingested pending canonical work in this explicitly configured directory.
+
+The provider is configurable shared HTTP infrastructure, not ThinLine application
+code. Integration uses only its HTTP API, with no dependency on its source code
+or X-TLR headers. This application must not administer or restart that service.
+An unauthenticated plain-HTTP endpoint is suitable only on a trusted private LAN
+until a dedicated authenticated service is built. Prefer HTTPS and configure the
+optional bearer token privately when supported. Audio leaves this computer when
+transcription is enabled; recordings and transcripts remain sensitive evidence.
+
+Set these **process environment** variables explicitly; `.env` is never loaded by
+the API. Do not put service addresses with credentials, tokens, or recordings in Git.
+
+| Variable suffix after `GFR_TRANSCRIPTION_` | Default | Bounds / behavior |
+| --- | --- | --- |
+| `ENABLED` | `false` | Boolean; no provider calls when disabled |
+| `BASE_URL` | Empty | Required when enabled; HTTP(S), no userinfo, query, fragment |
+| `MODEL` | `small.en` | Nonblank, at most 128 bytes |
+| `LANGUAGE` | `en` | Nonblank, at most 32 bytes |
+| `TIMEOUT` | `60s` | 1 second to 5 minutes, including upload and response |
+| `MAX_RESPONSE_BYTES` | `1048576` | 1024 to 4194304 bytes |
+| `MAX_AUDIO_BYTES` | `33554432` | 1024 to 134217728 bytes |
+| `MAX_ATTEMPTS` | `3` | 1 to 5 total attempts, including interrupted claims |
+| `RETRY_DELAY` | `5s` | 1 second to 1 minute; exponential backoff capped at 1 minute |
+| `BEARER_TOKEN` | Empty | Optional, environment only, at most 4096 bytes |
+| `PROMPT`, `WORD_BOOST` | Empty | Optional, each at most 2048 bytes; stored as evaluation settings |
+
+Configuration text rejects control characters. Never put secrets in a prompt or
+word boost. Requests stream the verified original MP3/WAV file from disk using
+multipart `file`, `model`, `language`, `prompt`, `response_format=json`,
+`temperature=0`, `beam_size=5`, `best_of=5`, and `word_boost`. Analysis has already
+validated and fingerprinted the audio; uploading the original preserves the
+verified service's input contract. The upload filename is a generic basename.
+No redirect is followed, including redirects to another URL on the same host.
+Error response reads are capped at 4096 bytes and never logged or persisted.
+
+Only HTTP 200 with a valid nonempty JSON string `text` succeeds. Trailing JSON,
+oversized bodies, invalid text, and unsafe control/format characters are rejected.
+`transcription_raw_text` stores the exact decoded provider string; `transcript`
+only collapses whitespace. Neither is interpreted as instructions. Whisper can
+hallucinate; the observed baseline **"Thank you for reporting on the distraction."**
+is preserved as evidence without correcting its words or inferring any apparatus.
+Provider, model, language, prompt, fixed decoding options, timestamps, and attempt
+outcomes allow later evaluation. There is no classification, status change,
+incident creation, WebSocket, or CAD action; the application remains unofficial
+and has no CAD authority.
+
+Lifecycle: pending waits for an enabled worker; processing owns a database lease;
+completed preserves successful evidence; failed with `transcription_retryable=true`
+waits for its retry time; failed with false is permanent/exhausted; duplicate
+aliases are skipped. Disabled is an operational worker state, logged explicitly,
+and leaves database work unchanged rather than discarding it. HTTP 408/429/5xx,
+transport failures, and timeouts retry within the configured limit. Other HTTP
+errors, malformed responses, oversized input, and unavailable/changed source files
+are permanent. Cancellation records a safe canceled attempt and permits a bounded
+retry if attempts remain.
+
+Claims use short PostgreSQL transactions and unique tokens; no transaction stays
+open during HTTP. A lease expires after the request timeout plus 30 seconds.
+Restart recovers expired claims, retaining interrupted attempts. Successful text
+cannot be overwritten by a late result or ordinary UPDATE. The provider does not
+offer an idempotency contract: a crash after remote processing but before database
+completion can require another HTTP request. Exactly-once remote execution across
+that failure boundary is not promised; completed database results and normal
+duplicate observations are idempotent. A lost source file or interrupted audio
+analysis still requires operator review; transcription does not recover analysis.
+
+Structured logs contain safe outcomes and transmission IDs, never raw provider
+errors, transcript text, tokens, URLs, or authorization headers. `/api/health`
+remains independent of both services; `/api/ready` still checks PostgreSQL only.
+Ctrl+C cancels in-flight requests, joins workers, closes idle HTTP connections,
+and then closes PostgreSQL. No continuous Whisper health polling is performed.
+
+Normal `go test ./...` uses fakes/httptest and skips the opt-in live check. See
+[development instructions](../docs/development.md#remote-transcription-verification)
+for its prerequisites and cleanup. `internal/transcription` owns the provider and
+worker; `internal/database/transcription.go` implements the small persistence
+interface. No additional Go dependencies are required.
+
 HTTP API foundation using the Go standard library and `github.com/jackc/pgx/v5/pgxpool`.
 The temporary
 module name is `greenwich-fire-responder/backend`. Requires Go 1.26 or later.
@@ -187,7 +273,8 @@ and joins the watcher before closing the connection pool.
   later reappears, it is reconsidered; database identity still prevents reinsertion
   of a previously stored path. Memory use scales with directory entries.
 
-This remains shadow mode with no CAD authority. It runs no Whisper, classification,
+This remains shadow mode with no CAD authority. Optional transcription follows
+analysis as described above. It runs no classification,
 incident creation, status updates, WebSockets, or CAD actions. Secrets and recordings
 must never be committed to Git.
 
@@ -202,15 +289,15 @@ Neither tool runs when `GFR_RECORDINGS_DIR` is empty.
 | --- | --- | --- |
 | `GFR_FFPROBE_PATH` | `ffprobe` | Executable name on PATH or explicit path |
 | `GFR_FFMPEG_PATH` | `ffmpeg` | Executable name on PATH or explicit path |
-| `GFR_AUDIO_TIMEOUT` | `30s` | 1s–5m; shared deadline for probe and decode per attempt |
-| `GFR_AUDIO_MAX_DURATION` | `10m` | 1s–1h; upper bound on reported duration and decoded samples |
-| `GFR_AUDIO_MAX_ATTEMPTS` | `3` | 1–10; bounded attempts, also counted in PostgreSQL |
-| `GFR_AUDIO_RETRY_INTERVAL` | `2s` | 10ms–1m; cancellation-aware delay between attempts |
+| `GFR_AUDIO_TIMEOUT` | `30s` | 1sâ€“5m; shared deadline for probe and decode per attempt |
+| `GFR_AUDIO_MAX_DURATION` | `10m` | 1sâ€“1h; upper bound on reported duration and decoded samples |
+| `GFR_AUDIO_MAX_ATTEMPTS` | `3` | 1â€“10; bounded attempts, also counted in PostgreSQL |
+| `GFR_AUDIO_RETRY_INTERVAL` | `2s` | 10msâ€“1m; cancellation-aware delay between attempts |
 
 FFprobe JSON must describe exactly one usable audio stream, with no additional
 video or other streams. Actual detected formats must be MP3 with MP3 audio, or WAV
 with supported PCM (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`,
-or `pcm_f64le`). Sample rates must be 8–192 kHz and channel counts 1–8. Extension
+or `pcm_f64le`). Sample rates must be 8â€“192 kHz and channel counts 1â€“8. Extension
 alone is not proof of valid audio. Corrupt, empty, unsupported, multiple-stream,
 video-only, and excessive-duration inputs fail safely.
 
@@ -309,7 +396,7 @@ Readiness checks connectivity, not migration version or application data.
 Run from `backend/`:
 
 ```sh
-gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis
+gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis internal/transcription
 go vet ./...
 go test ./...
 ```

@@ -1,5 +1,71 @@
 # PostgreSQL development
 
+## Remote transcription verification
+
+The optional speech provider is configurable shared infrastructure, not part of
+ThinLine application code. Use only its HTTP API. Never modify, copy, restart, or
+stop the Linux service. Unauthenticated plain HTTP is intended only for a trusted
+private LAN until a dedicated authenticated service exists; prefer HTTPS and an
+environment-only bearer token when supported. Never commit a private service
+address, token, database password, or recording.
+
+Apply migration 000004 and run all four rollback-only SQL suites using
+[database/README.md](../database/README.md). See
+[backend/README.md](../backend/README.md#optional-remote-speech-to-text) for every
+transcription variable, default, bound, lifecycle state, and retry limitation.
+Configure the private `GFR_DATABASE_URL` and `GFR_TRANSCRIPTION_BASE_URL` directly
+in the process environment; the API does not load `.env`. Set
+`GFR_TRANSCRIPTION_ENABLED=true`, `GFR_DATABASE_REQUIRED=true`, model `small.en`,
+and language `en`. With transcription disabled (the default), HTTP and ingestion
+continue normally; readiness still depends only on PostgreSQL.
+
+For a controlled local check, confirm the Compose PostgreSQL service is healthy
+and that the provider's `GET /health` returns status ok and `GET /v1/models`
+includes small.en. The opt-in test repeats bounded provider preflight requests and
+then runs the actual API lifecycle on localhost:8080 with an audited HTTP transport.
+It creates a new empty temporary watched directory and copies the source only
+after watcher startup. It never uses the live recordings directory as a watcher
+test fixture. Windows source-directory example: `C:\Users\User\SDRTrunk\recordings`.
+
+After privately setting the required database and provider process settings, run
+from `backend/` with FFmpeg and FFprobe installed/on PATH:
+
+```powershell
+$env:GFR_HTTP_ADDR = '127.0.0.1:8080'
+$env:GFR_DATABASE_REQUIRED = 'true'
+$env:GFR_TRANSCRIPTION_ENABLED = 'true'
+$env:GFR_TRANSCRIPTION_MODEL = 'small.en'
+$env:GFR_TRANSCRIPTION_LANGUAGE = 'en'
+$env:GFR_LIVE_TRANSCRIPTION_TEST = 'true'
+$env:GFR_LIVE_SOURCE = 'C:\Users\User\SDRTrunk\recordings\20260905_081609Greenwich_Fairfield_T-NEW_GFD1__TO_57201_FROM_578060.mp3'
+go test ./cmd/api -run '^TestControlledLiveTranscription$' -count=1 -v -timeout 240s
+Remove-Item Env:GFR_LIVE_TRANSCRIPTION_TEST
+Remove-Item Env:GFR_LIVE_SOURCE
+```
+
+Do not run the live check against a database already containing the source audio's
+canonical fingerprint: it must not delete or replace a pre-existing canonical row.
+The check counts exactly one multipart POST, compares stored raw text to the actual
+response in memory, checks provider/model/attempt timestamps, repeats observation,
+and adds a content alias without another transcription. The baseline result is
+"Thank you for reporting on the distraction." Preserve that evidence; Whisper
+output is untrusted, can hallucinate, and must not become a status command.
+
+The check cancels and joins the API, verifies port 8080 can be bound again, removes
+only its temporary copies/directory and exact test rows, and verifies the original
+SHA-256, size, and modification time are unchanged. Verbose live output includes
+the raw evidence; keep it private. Normal tests do not log transcripts or contact
+the service. Logs use safe outcome codes, not remote errors or credentials.
+If test execution is forcibly killed, review the reported test artifacts manually;
+normal failures run deferred cleanup. No permanent process is started.
+
+The worker resumes only persisted eligible canonical work in the configured
+directory. This does not replay historical filenames into ingestion. Path-based
+`source_identity` and content-based `audio_fingerprint` remain separate. Normal
+duplicates are idempotent; remote exactly-once execution after an uncertain crash
+is impossible without provider support. No classifications, incidents, status
+changes, WebSockets, or CAD writes are implemented.
+
 This Compose project provides PostgreSQL 16 for local development. The Go API runs
 separately on Windows and uses explicitly configured environment variables to
 connect to it. Run the commands below in PowerShell
@@ -168,7 +234,7 @@ before relying on ingestion. Polling cannot capture files removed between scans,
 and size/mtime stability is a heuristic rather than a recorder completion signal.
 
 This foundation stores metadata and audio measurements in shadow mode with no CAD
-authority. It performs no transcription, classification, incident creation,
+authority, with optional remote transcription as described above. It performs no classification, incident creation,
 unit-status updates, or WebSocket/CAD publication. Secrets and recordings must
 never be committed to Git. Automated watcher tests use temporary synthetic files;
 do not use a live recordings directory as a test fixture.
@@ -176,7 +242,7 @@ do not use a live recordings directory as a test fixture.
 From `backend/`, verify the code with:
 
 ```powershell
-gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis
+gofmt -w cmd/api internal/config internal/database internal/httpapi internal/recordings internal/audioanalysis internal/transcription
 go vet ./...
 go test ./...
 ```
@@ -228,5 +294,5 @@ Analysis claims and retries are persisted, but no durable lease recovery or star
 replay is implemented. A crash or database outage can leave work requiring review.
 The worker is serial, so slow analysis delays subsequent directory scans while the
 HTTP API remains responsive. Content aliases must not be counted as extra logical
-transmissions. No Whisper, classification, status changes, incidents, or CAD writes
+transmissions. Optional transcription uses its own durable lease worker. No classification, status changes, incidents, or CAD writes
 are performed.

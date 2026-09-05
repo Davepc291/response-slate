@@ -1,5 +1,51 @@
 # Local development database
 
+## Migration 000004: remote transcription
+
+Apply only to this repository's existing **local development** PostgreSQL
+container, after versions 000001 through 000003. The API never migrates automatically.
+From the repository root in PowerShell (the container reads its own credentials):
+
+```powershell
+Get-Content -Raw database/migrations/000004_transcription.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+Get-Content -Raw database/tests/000004_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+The migration is transactional and records `000004`; apply once, after checking
+`schema_migrations`. The test runs in a transaction and rolls back all fixtures.
+Rerun tests 000001 through 000003 as well using their commands below.
+
+New transmission columns record claim token, attempt count, retryability/due time,
+start/finish timestamps, safe allowlisted error, exact raw provider text, and
+evaluation settings. `transcript` is whitespace-normalized text only.
+`transcription_attempts` retains provider/model/settings, lifecycle, raw successful
+text, and safe failure evidence for each attempt. It references the transmission;
+test cleanup must remove only its own attempts before its own transmission rows.
+There are no audio bytes or credentials in these tables.
+
+`claim_transcription` locks one eligible canonical row, assigns a unique token and
+lease, and records the attempt atomically. Competing claims cannot own the same
+unexpired lease. Only completed audio analysis with a canonical fingerprint and
+probe is eligible; duplicate aliases become transcription `skipped`.
+`finish_transcription` atomically stores the result and attempt outcome only for
+the current claim token. Late completion/failure is a no-op; completed evidence
+is protected against ordinary UPDATE. No database transaction spans an HTTP call.
+
+Pending, processing, completed and skipped use existing status values. Failed plus
+`transcription_retryable` distinguishes retryable and permanent failure. Disabling
+the worker leaves pending/retry work unchanged. Expired claims are marked
+interrupted and retried within a maximum of five total attempts; exhaustion is
+terminal. A crash after remote success but before local commit can repeat a
+remote request because the provider has no guaranteed idempotency key contract.
+Source identities remain path-based; `audio_fingerprint` remains the distinct
+canonical audio-content hash. Successful aliases never become new transcription jobs.
+
+Raw Whisper text is untrusted and may hallucinate. Store it for evaluation, never
+as a trusted command or unit inference. These changes add no incidents, board
+state, classification, or CAD writes. Secrets and recordings must never enter Git.
+
 This directory contains PostgreSQL migrations and SQL tests for the local Docker
 development database in this repository's `greenwich-fire-responder` Compose
 project. This milestone stores radio metadata and immutable shadow unit-status

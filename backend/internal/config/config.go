@@ -10,6 +10,7 @@ import (
 
 	"greenwich-fire-responder/backend/internal/audioanalysis"
 	"greenwich-fire-responder/backend/internal/recordings"
+	"greenwich-fire-responder/backend/internal/transcription"
 )
 
 type Config struct {
@@ -18,15 +19,17 @@ type Config struct {
 	DatabaseRequired bool
 	Recordings       recordings.Options
 	Audio            audioanalysis.Options
+	Transcription    transcription.Options
 }
 
 // Load does not read .env files. Errors never contain environment values.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:    strings.TrimSpace(os.Getenv("GFR_HTTP_ADDR")),
-		DatabaseURL: strings.TrimSpace(os.Getenv("GFR_DATABASE_URL")),
-		Recordings:  recordings.DefaultOptions(),
-		Audio:       audioanalysis.DefaultOptions(),
+		HTTPAddr:      strings.TrimSpace(os.Getenv("GFR_HTTP_ADDR")),
+		DatabaseURL:   strings.TrimSpace(os.Getenv("GFR_DATABASE_URL")),
+		Recordings:    recordings.DefaultOptions(),
+		Audio:         audioanalysis.DefaultOptions(),
+		Transcription: transcription.DefaultOptions(),
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = "127.0.0.1:8080"
@@ -94,5 +97,50 @@ func Load() (Config, error) {
 	if err := cfg.Audio.Validate(); err != nil {
 		return Config{}, err
 	}
+	if err := loadTranscription(&cfg.Transcription); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func loadTranscription(o *transcription.Options) error {
+	invalid := errors.New("invalid transcription configuration")
+	if v := os.Getenv("GFR_TRANSCRIPTION_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return invalid
+		}
+		o.Enabled = b
+	}
+	for name, target := range map[string]*string{"BASE_URL": &o.BaseURL, "MODEL": &o.Model, "LANGUAGE": &o.Language, "BEARER_TOKEN": &o.BearerToken, "PROMPT": &o.Prompt, "WORD_BOOST": &o.WordBoost} {
+		if v := os.Getenv("GFR_TRANSCRIPTION_" + name); v != "" {
+			*target = v
+		}
+	}
+	for name, target := range map[string]*time.Duration{"TIMEOUT": &o.Timeout, "RETRY_DELAY": &o.RetryDelay} {
+		if v := os.Getenv("GFR_TRANSCRIPTION_" + name); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return invalid
+			}
+			*target = d
+		}
+	}
+	for name, target := range map[string]*int64{"MAX_RESPONSE_BYTES": &o.MaxResponseBytes, "MAX_AUDIO_BYTES": &o.MaxAudioBytes} {
+		if v := os.Getenv("GFR_TRANSCRIPTION_" + name); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return invalid
+			}
+			*target = n
+		}
+	}
+	if v := os.Getenv("GFR_TRANSCRIPTION_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return invalid
+		}
+		o.MaxAttempts = n
+	}
+	return o.Validate()
 }

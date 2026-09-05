@@ -16,6 +16,7 @@ import (
 	"greenwich-fire-responder/backend/internal/database"
 	"greenwich-fire-responder/backend/internal/httpapi"
 	"greenwich-fire-responder/backend/internal/recordings"
+	"greenwich-fire-responder/backend/internal/transcription"
 )
 
 func main() {
@@ -32,6 +33,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return runWithConfig(ctx, cfg, nil, slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+}
+
+// Explicit context and transport make complete API lifecycle tests possible
+// without signals, external providers, or permanent processes.
+func runWithConfig(ctx context.Context, cfg config.Config, transport http.RoundTripper, logger *slog.Logger) error {
 
 	db, err := database.Open(ctx, cfg.DatabaseURL, cfg.DatabaseRequired)
 	if err != nil {
@@ -41,7 +48,20 @@ func run() error {
 
 	ingestionCtx, cancelIngestion := context.WithCancel(ctx)
 	ingestionDone := make(chan struct{})
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	transcriptionDone := make(chan struct{})
+	if cfg.Transcription.Enabled && cfg.Recordings.Directory != "" {
+		provider, err := transcription.NewHTTPProvider(cfg.Transcription, transport)
+		if err != nil {
+			cancelIngestion()
+			return err
+		}
+		worker := &transcription.Worker{Options: cfg.Transcription, Directory: cfg.Recordings.Directory, Store: db, Provider: provider, Logger: logger}
+		go func() { defer close(transcriptionDone); defer provider.Close(); worker.Run(ingestionCtx) }()
+	} else {
+		logger.Info("transcription", "outcome", "disabled")
+		close(transcriptionDone)
+	}
+	defer func() { cancelIngestion(); <-transcriptionDone }()
 	processor := &audioanalysis.Processor{Options: cfg.Audio,
 		Analyzer: audioanalysis.Analyzer{Options: cfg.Audio, Tools: audioanalysis.ProcessTools{}}, Store: db, Logger: logger}
 	if cfg.Recordings.Directory == "" {
@@ -81,8 +101,6 @@ func run() error {
 	case err := <-serveErr:
 		return err
 	case <-ctx.Done():
-		// Restore default signal handling so a second interrupt can force exit.
-		stop()
 	}
 
 	log.Print("shutting down greenwich-fire-responder-api")

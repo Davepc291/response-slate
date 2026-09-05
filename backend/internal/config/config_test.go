@@ -9,6 +9,7 @@ import (
 	"greenwich-fire-responder/backend/internal/audioanalysis"
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/recordings"
+	"greenwich-fire-responder/backend/internal/transcription"
 )
 
 func TestLoad(t *testing.T) {
@@ -29,6 +30,7 @@ func TestLoad(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.want.Recordings = recordings.DefaultOptions()
 			tc.want.Audio = audioanalysis.DefaultOptions()
+			tc.want.Transcription = transcription.DefaultOptions()
 			t.Setenv("GFR_HTTP_ADDR", tc.addr)
 			t.Setenv("GFR_DATABASE_URL", tc.url)
 			t.Setenv("GFR_DATABASE_REQUIRED", tc.required)
@@ -67,6 +69,9 @@ func TestLoadDoesNotReadDotEnv(t *testing.T) {
 
 func clearRecordingEnv(t *testing.T) {
 	t.Helper()
+	for _, name := range []string{"ENABLED", "BASE_URL", "MODEL", "LANGUAGE", "BEARER_TOKEN", "PROMPT", "WORD_BOOST", "TIMEOUT", "RETRY_DELAY", "MAX_RESPONSE_BYTES", "MAX_AUDIO_BYTES", "MAX_ATTEMPTS"} {
+		t.Setenv("GFR_TRANSCRIPTION_"+name, "")
+	}
 	for _, name := range []string{"GFR_RECORDINGS_DIR", "GFR_RECORDING_TIMEZONE", "GFR_RECORDING_POLL_INTERVAL",
 		"GFR_RECORDING_STABLE_FOR", "GFR_RECORDING_MAX_WAIT", "GFR_RECORDING_RETRY_INTERVAL", "GFR_RECORDING_MAX_ATTEMPTS",
 		"GFR_FFPROBE_PATH", "GFR_FFMPEG_PATH", "GFR_AUDIO_TIMEOUT", "GFR_AUDIO_MAX_DURATION", "GFR_AUDIO_MAX_ATTEMPTS", "GFR_AUDIO_RETRY_INTERVAL"} {
