@@ -49,6 +49,17 @@ function Get-GfrTaskArguments {
         '-File', $Context.Wrapper) | ForEach-Object { ConvertTo-GfrArgument $_ }) -join ' '
 }
 
+function Get-GfrModelHash {
+    param([string]$Path)
+    # Windows PowerShell 5.1 Get-FileHash uses ForEach-Object ProviderPath,
+    # whose ShouldProcess inherits WhatIf and suppresses the read-only lookup.
+    # Its InputStream parameter bypasses that lookup without changing WhatIf
+    # preferences in any scope. OpenRead never modifies the model.
+    $stream = [IO.File]::OpenRead($Path)
+    try { return Get-FileHash -InputStream $stream -Algorithm SHA1 }
+    finally { $stream.Dispose() }
+}
+
 function New-GfrConfiguration {
     param($Context, [string]$Executable, [string]$Model, [string]$FFmpeg,
         [ValidateRange(1,64)][int]$LogMaxMB = 10, [ValidateRange(1,10)][int]$LogArchives = 3)
@@ -61,7 +72,7 @@ function New-GfrConfiguration {
     foreach ($path in @($Executable, $Model, $FFmpeg)) {
         if ($path.StartsWith($Context.Data + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Runtime inputs must be outside the managed data directory.' }
     }
-    if ((Get-FileHash -LiteralPath $Model -Algorithm SHA1).Hash -ine $script:ModelSHA1) { throw 'small.en model checksum mismatch.' }
+    if ((Get-GfrModelHash $Model).Hash -ine $script:ModelSHA1) { throw 'small.en model checksum mismatch.' }
     Assert-GfrExecutable $Executable
     Assert-GfrExecutable $FFmpeg
     [pscustomobject]@{ Version = 1; OwnerSid = $Context.Sid; Executable = $Executable; Model = $Model; FFmpeg = $FFmpeg

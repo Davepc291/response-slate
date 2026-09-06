@@ -59,6 +59,49 @@ Describe 'Native quoting and local path validation' {
     }
 }
 
+Describe 'Top-level installer WhatIf checksum regression' {
+    # Preserve this loaded module and its scheduler mocks when the real entry
+    # script imports it. All file, hash, PE and port validation stays real.
+    Mock Import-Module {}
+    Mock Get-GfrOwnedTask -ModuleName WhisperRuntime { $null }
+    Mock New-GfrTaskDefinition -ModuleName WhisperRuntime { [pscustomobject]@{Kind='test definition'} }
+    Mock Register-ScheduledTask -ModuleName WhisperRuntime { throw 'Registration must never run.' }
+    Mock Set-Content -ModuleName WhisperRuntime { throw 'Configuration writes must never run.' }
+    It 'hashes real bytes under StrictMode through Install-Whisper.ps1 -WhatIf' {
+        Set-StrictMode -Version Latest
+        $fixture=Join-Path $TestDrive 'runtime inputs with spaces'
+        $null=[IO.Directory]::CreateDirectory($fixture)
+        $exe=Join-Path $fixture 'whisper-server.exe'
+        $ffmpeg=Join-Path $fixture 'ffmpeg.exe'
+        $model=Join-Path $fixture 'ggml-small.en.bin'
+        [IO.File]::Copy((Join-Path $env:SystemRoot 'System32\cmd.exe'),$exe)
+        [IO.File]::Copy($exe,$ffmpeg)
+        [IO.File]::WriteAllText($model,'abc',[Text.Encoding]::ASCII)
+        $savedHash= & (Get-Module WhisperRuntime) { $script:ModelSHA1 }
+        $savedPreference=$WhatIfPreference
+        # A fixture checksum replaces only the expected digest, never hashing.
+        & (Get-Module WhisperRuntime) { $script:ModelSHA1='A9993E364706816ABA3E25717850C26C9CD0D89D' }
+        $entry=Join-Path (Split-Path $PSScriptRoot -Parent) 'Install-Whisper.ps1'
+        # Use an ephemeral port for the real exclusive-bind check.
+        Mock Assert-GfrPortAvailable -ModuleName WhisperRuntime {
+            $socket=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Tcp)
+            try { $socket.ExclusiveAddressUse=$true; $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Any,0)) }
+            finally { $socket.Dispose() }
+        }
+        try {
+            $WhatIfPreference=$true
+            { & $entry -Executable $exe -Model $model -FFmpeg $ffmpeg -WhatIf } | Should Not Throw
+            $WhatIfPreference | Should Be $true
+            Assert-MockCalled Assert-GfrPortAvailable -ModuleName WhisperRuntime -Times 1 -Scope It
+            Assert-MockCalled New-GfrTaskDefinition -ModuleName WhisperRuntime -Times 1 -Scope It
+            Assert-MockCalled Register-ScheduledTask -ModuleName WhisperRuntime -Times 0 -Scope It
+            Assert-MockCalled Set-Content -ModuleName WhisperRuntime -Times 0 -Scope It
+            [IO.File]::WriteAllText($model,'wrong',[Text.Encoding]::ASCII)
+            { & $entry -Executable $exe -Model $model -FFmpeg $ffmpeg -WhatIf } | Should Throw 'small.en model checksum mismatch.'
+        }
+        finally { $WhatIfPreference=$savedPreference; & (Get-Module WhisperRuntime) { param($digest) $script:ModelSHA1=$digest } $savedHash }
+    }
+}
 InModuleScope WhisperRuntime {
     Describe 'Reparse-point refusal' {
         Mock Test-Path {$true}
@@ -69,7 +112,7 @@ InModuleScope WhisperRuntime {
     }
     Describe 'Validation before registration' {
         Mock Assert-GfrPath { return $Path }
-        Mock Get-FileHash { [pscustomobject]@{Hash='wrong'} }
+        Mock Get-GfrModelHash { [pscustomobject]@{Hash='wrong'} }
         It 'rejects a checksum mismatch' {
             $ctx=[pscustomobject]@{Data='C:\managed';Sid='fixture'}
             { New-GfrConfiguration $ctx 'C:\bin\whisper-server.exe' 'C:\model\ggml-small.en.bin' 'C:\bin\ffmpeg.exe' } | Should Throw
@@ -79,7 +122,7 @@ InModuleScope WhisperRuntime {
             { New-GfrConfiguration $ctx 'C:\managed\whisper-server.exe' 'C:\model\ggml-small.en.bin' 'C:\bin\ffmpeg.exe' } | Should Throw
         }
         It 'accepts only the exact verified model checksum' {
-            Mock Get-FileHash { [pscustomobject]@{Hash='DB8A495A91D927739E50B3FC1CC4C6B8F6C2D022'} }
+            Mock Get-GfrModelHash { [pscustomobject]@{Hash='DB8A495A91D927739E50B3FC1CC4C6B8F6C2D022'} }
             Mock Assert-GfrExecutable {}
             $ctx=[pscustomobject]@{Data='C:\managed';Sid='fixture'}
             $config=New-GfrConfiguration $ctx 'C:\bin\whisper-server.exe' 'C:\model\ggml-small.en.bin' 'C:\bin\ffmpeg.exe'
