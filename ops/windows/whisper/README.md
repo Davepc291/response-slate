@@ -66,8 +66,14 @@ but the documented deployment command uses an administrator shell.
 
    For nondefault locations, pass `-Executable`, `-Model`, and `-FFmpeg` as quoted
    absolute paths to the install command. Optional limits are `-LogMaxMB 10`
-   (1–64) and `-LogArchives 3` (1–10). A registration error can leave the validated
-   user-local configuration in place; inspect status before retrying. Existing
+   (1–64) and `-LogArchives 3` (1–10). On registration failure, a newly created runtime.json is removed; an existing
+   runtime.json is restored byte-for-byte, including an empty file. Rollback only
+   touches that configuration. Directories, logs, models, binaries and recordings
+   are retained. An exclusive file handle prevents concurrent configuration writes.
+   Correct the error and rerun the same install command; configuration left by an
+   older failed installer needs no manual deletion. Inspect status before retrying.
+   This rollback covers caught failures, not abrupt process termination or power
+   loss; Task Scheduler and the filesystem do not share an atomic transaction. Existing
    tasks are never overwritten, including a foreign task with the same name.
 6. Confirm the exact task is running, the recorded process matches executable and
    creation time, port 8001 listens on loopback only, and HTTP status is 200.
@@ -94,7 +100,7 @@ but the documented deployment command uses an administrator shell.
 Task name is `GFR-Whisper-<current-user-SID>` in the root task folder. It starts at
 that user's logon, uses `IgnoreNew` to prevent duplicate task instances, starts
 when available, and allows at most three Scheduler restart attempts separated by
-30 seconds after failure. There is no execution-time limit. Battery operation is
+one minute after failure (the Windows-supported minimum). There is no execution-time limit. Battery operation is
 allowed. It requires the user to be logged on and is not a boot-time Windows service.
 Task Scheduler's restart bookkeeping is platform-managed; inspect Last Run Result
 in Task Scheduler when all restart attempts are exhausted, correct the issue, and

@@ -134,15 +134,73 @@ InModuleScope WhisperRuntime {
         Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
         Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
         Mock New-ScheduledTaskPrincipal { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal') }
-        Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings') }
+        Mock New-ScheduledTaskSettingsSet {
+            $settings=[Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings')
+            $settings | Add-Member NoteProperty RestartInterval 'PT1M'
+            $settings | Add-Member NoteProperty RestartCount 3
+            return $settings
+        }
         Mock New-ScheduledTask { [pscustomobject]@{Kind='task'} }
         It 'uses interactive current-user logon, least privilege, and bounded restart' {
             $ctx=Get-GfrContext
             $null=New-GfrTaskDefinition $ctx
             Assert-MockCalled New-ScheduledTaskTrigger -Times 1 -ParameterFilter {$AtLogOn -and $User -like 'S-1-*'}
             Assert-MockCalled New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {$LogonType -eq 'Interactive' -and $RunLevel -eq 'Limited'}
-            Assert-MockCalled New-ScheduledTaskSettingsSet -Times 1 -ParameterFilter {$MultipleInstances -eq 'IgnoreNew' -and $StartWhenAvailable -and $RestartCount -eq 3 -and $RestartInterval.TotalSeconds -eq 30 -and $ExecutionTimeLimit -eq [TimeSpan]::Zero}
+            Assert-MockCalled New-ScheduledTaskSettingsSet -Times 1 -ParameterFilter {$MultipleInstances -eq 'IgnoreNew' -and $StartWhenAvailable -and $RestartCount -eq 3 -and $RestartInterval.TotalSeconds -eq 60 -and $ExecutionTimeLimit -eq [TimeSpan]::Zero}
             Assert-MockCalled New-ScheduledTaskAction -Times 1 -ParameterFilter {$Argument -like '*"-File"*"Run-Whisper.ps1"*' -or $Argument -like '*Run-Whisper.ps1*'}
+        }
+        It 'rejects sub-minute restart intervals and any count other than three' {
+            Set-StrictMode -Version Latest
+            foreach ($interval in @('PT0S','PT30S','PT59S')) {
+                { Assert-GfrRestartPolicy ([pscustomobject]@{RestartInterval=$interval;RestartCount=3}) } | Should Throw
+            }
+            { Assert-GfrRestartPolicy ([pscustomobject]@{RestartInterval='PT1M';RestartCount=3}) } | Should Not Throw
+            foreach ($count in @(0,2,4)) {
+                { Assert-GfrRestartPolicy ([pscustomobject]@{RestartInterval='PT1M';RestartCount=$count}) } | Should Throw
+            }
+            Mock New-ScheduledTaskSettingsSet { [pscustomobject]@{RestartInterval='PT30S';RestartCount=3} }
+            { New-GfrTaskDefinition (Get-GfrContext) } | Should Throw 'at least one minute'
+            Assert-MockCalled New-ScheduledTask -Times 0 -Scope It
+        }
+    }
+    Describe 'Registration failure configuration rollback' {
+        Mock Get-GfrContext { $script:installContext }
+        Mock Get-GfrOwnedTask { $null }
+        Mock New-GfrConfiguration { [pscustomobject]@{Version=1;OwnerSid='fixture'} }
+        Mock New-GfrTaskDefinition { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_ScheduledTask') }
+        Mock Assert-GfrPortAvailable {}
+        Mock Register-ScheduledTask { throw 'Simulated registration failure' }
+        It 'does not create configuration or directories during WhatIf' {
+            $dir=Join-Path $TestDrive 'whatif-registration'
+            $script:installContext=[pscustomobject]@{Data=$dir;Temp=(Join-Path $dir 'temp');Logs=(Join-Path $dir 'logs');Config=(Join-Path $dir 'runtime.json');TaskName='fixture';TaskPath='\'}
+            Install-GfrWhisper -FFmpeg 'C:\fixture\ffmpeg.exe' -WhatIf
+            (Test-Path -LiteralPath $dir) | Should Be $false
+            Assert-MockCalled Register-ScheduledTask -Times 0 -Scope It
+        }
+        It 'removes only newly created configuration and safely retries after failure' {
+            Set-StrictMode -Version Latest
+            foreach ($variant in @('absent','existing','empty')) {
+                $dir=Join-Path $TestDrive $variant
+                $script:installContext=[pscustomobject]@{Data=$dir;Temp=(Join-Path $dir 'temp');Logs=(Join-Path $dir 'logs');Config=(Join-Path $dir 'runtime.json');TaskName='fixture';TaskPath='\'}
+                $null=[IO.Directory]::CreateDirectory($script:installContext.Logs)
+                $sentinel=Join-Path $script:installContext.Logs 'keep.log'
+                [IO.File]::WriteAllText($sentinel,'preserve')
+                $before=[byte[]]@(255,254,97,0,13,0,10,0)
+                if ($variant -eq 'empty') { $before=[byte[]]@() }
+                if ($variant -ne 'absent') { [IO.File]::WriteAllBytes($script:installContext.Config,$before) }
+                Mock Register-ScheduledTask { throw 'Simulated registration failure' }
+                for ($attempt=0; $attempt -lt 2; $attempt++) {
+                    { Install-GfrWhisper -FFmpeg 'C:\fixture\ffmpeg.exe' -Confirm:$false } | Should Throw 'Simulated registration failure'
+                    if ($variant -eq 'absent') { (Test-Path -LiteralPath $script:installContext.Config) | Should Be $false }
+                    else { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:installContext.Config)) | Should Be ([Convert]::ToBase64String($before)) }
+                    [IO.File]::ReadAllText($sentinel) | Should Be 'preserve'
+                }
+                Mock Register-ScheduledTask {}
+                { Install-GfrWhisper -FFmpeg 'C:\fixture\ffmpeg.exe' -Confirm:$false } | Should Not Throw
+                (Get-Content -LiteralPath $script:installContext.Config -Raw | ConvertFrom-Json).Version | Should Be 1
+                [IO.File]::ReadAllText($sentinel) | Should Be 'preserve'
+            }
+            Assert-MockCalled Register-ScheduledTask -Times 9 -Scope It -ParameterFilter {$TaskName -eq 'fixture' -and $TaskPath -eq '\'}
         }
     }
     Describe 'Exact task targeting' {

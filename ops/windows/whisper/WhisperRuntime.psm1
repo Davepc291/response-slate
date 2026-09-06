@@ -127,14 +127,23 @@ function Get-GfrOwnedTask {
     return $task
 }
 
+function Assert-GfrRestartPolicy {
+    param($Settings)
+    $interval = [Xml.XmlConvert]::ToTimeSpan($Settings.RestartInterval)
+    if ($interval -lt [TimeSpan]::FromMinutes(1) -or $Settings.RestartCount -ne 3) {
+        throw 'GFR requires exactly three restart attempts with an interval of at least one minute.'
+    }
+}
+
 function New-GfrTaskDefinition {
     param($Context)
     $action = New-ScheduledTaskAction -Execute $Context.Shell -Argument (Get-GfrTaskArguments $Context) -WorkingDirectory $Context.Data
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $Context.Sid
     $principal = New-ScheduledTaskPrincipal -UserId $Context.Sid -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -RestartCount 3 `
-        -RestartInterval (New-TimeSpan -Seconds 30) -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Assert-GfrRestartPolicy $settings
     return New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $Context.Description
 }
 
@@ -152,8 +161,42 @@ function Install-GfrWhisper {
     $definition = New-GfrTaskDefinition $context
     if ($PSCmdlet.ShouldProcess($context.TaskName, 'Create user-local runtime configuration and register logon task (do not start)')) {
         foreach ($path in @($context.Data, $context.Temp, $context.Logs)) { $null = Assert-GfrPath $path; [IO.Directory]::CreateDirectory($path) | Out-Null }
-        $config | ConvertTo-Json | Set-Content -LiteralPath $context.Config -Encoding UTF8
-        Register-ScheduledTask -TaskName $context.TaskName -TaskPath $context.TaskPath -InputObject $definition -ErrorAction Stop | Out-Null
+        # Hold an exclusive handle through registration so concurrent installers
+        # cannot overwrite this attempt's configuration. Preserve existing bytes.
+        $existed = Test-Path -LiteralPath $context.Config
+        $mode = if ($existed) { [IO.FileMode]::Open } else { [IO.FileMode]::CreateNew }
+        $stream = [IO.File]::Open($context.Config, $mode, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $original = $null
+        try {
+            if ($existed) {
+                $backup = [IO.MemoryStream]::new()
+                try { $stream.CopyTo($backup); $original = $backup.ToArray() }
+                finally { $backup.Dispose() }
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($config | ConvertTo-Json))
+            $stream.Position = 0
+            $stream.SetLength(0)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+            Register-ScheduledTask -TaskName $context.TaskName -TaskPath $context.TaskPath -InputObject $definition -ErrorAction Stop | Out-Null
+        }
+        catch {
+            if ($existed) {
+                if ($null -ne $original) {
+                    $stream.Position = 0
+                    $stream.SetLength(0)
+                    $stream.Write($original, 0, $original.Length)
+                    $stream.Flush()
+                }
+            }
+            else {
+                $stream.Dispose()
+                $null = Assert-GfrPath $context.Config -ExistingFile
+                Remove-Item -LiteralPath $context.Config -ErrorAction Stop
+            }
+            throw
+        }
+        finally { $stream.Dispose() }
     }
 }
 
