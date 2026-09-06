@@ -117,12 +117,36 @@ function Get-GfrWhisperArguments {
         ForEach-Object { ConvertTo-GfrArgument $_ }) -join ' '
 }
 
+function ConvertTo-GfrAccountSid {
+    param([string]$Account)
+    return ([Security.Principal.NTAccount]::new($Account)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Resolve-GfrPrincipalSid {
+    param([string]$UserId)
+    try {
+        if ([string]::IsNullOrWhiteSpace($UserId)) { throw 'Missing principal.' }
+        if ($UserId -match '^S-1-') { return ([Security.Principal.SecurityIdentifier]::new($UserId)).Value }
+        # Scheduler can return an unqualified local name even when registered
+        # with a SID. Qualify it locally; never compare username suffixes or
+        # discard a supplied machine/domain qualifier.
+        if ($UserId -notmatch '[\\@]') { $UserId = [Environment]::MachineName + '\' + $UserId }
+        elseif ($UserId.StartsWith('.\')) { $UserId = [Environment]::MachineName + $UserId.Substring(1) }
+        return ConvertTo-GfrAccountSid $UserId
+    }
+    catch { throw 'Task principal could not be resolved; refusing to manage it.' }
+}
+
 function Get-GfrOwnedTask {
     param($Context)
     $task = Get-ScheduledTask -TaskPath $Context.TaskPath -ErrorAction Stop | Where-Object { $_.TaskName -ceq $Context.TaskName }
     if (-not $task) { return $null }
     if (@($task).Count -ne 1 -or @($task.Actions).Count -ne 1 -or $task.Description -cne $Context.Description -or
-        $task.Principal.UserId -ne $Context.Sid -or $task.Actions[0].Execute -ine $Context.Shell -or
+        $task.TaskPath -cne $Context.TaskPath -or
+        (Resolve-GfrPrincipalSid $task.Principal.UserId) -ne $Context.Sid -or
+        $task.Principal.LogonType -ne 'Interactive' -or $task.Principal.RunLevel -ne 'Limited' -or
+        $task.Actions[0].Execute -ine $Context.Shell -or
+        $task.Actions[0].WorkingDirectory -ine $Context.Data -or
         $task.Actions[0].Arguments -cne (Get-GfrTaskArguments $Context)) { throw 'Task ownership mismatch; refusing to manage it.' }
     return $task
 }

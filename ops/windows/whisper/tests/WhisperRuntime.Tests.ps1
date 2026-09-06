@@ -209,9 +209,56 @@ InModuleScope WhisperRuntime {
         It 'refuses a same-name task with a foreign action' {
             Mock Get-ScheduledTask {
                 $ctx=Get-GfrContext
-                [pscustomobject]@{TaskName=$ctx.TaskName;Description=$ctx.Description;Principal=[pscustomobject]@{UserId=$ctx.Sid};Actions=@([pscustomobject]@{Execute=$ctx.Shell;Arguments='foreign'})}
+                [pscustomobject]@{TaskName=$ctx.TaskName;TaskPath=$ctx.TaskPath;Description=$ctx.Description;Principal=[pscustomobject]@{UserId=$ctx.Sid;LogonType='Interactive';RunLevel='Limited'};Actions=@([pscustomobject]@{Execute=$ctx.Shell;WorkingDirectory=$ctx.Data;Arguments='foreign'})}
             }
             { Get-GfrOwnedTask (Get-GfrContext) } | Should Throw
+        }
+    }
+    Describe 'Scheduler normalized principal ownership' {
+        Mock ConvertTo-GfrAccountSid {
+            if ($Account -in @(([Environment]::MachineName+'\User'),'DKFIRE-7090\User')) { return 'S-1-5-21-3926228357-1868843804-2423023326-1001' }
+            if ($Account -in @('OTHERPC\User','OTHERDOMAIN\User')) { return 'S-1-5-21-111-222-333-1001' }
+            throw 'Unresolvable fixture principal'
+        }
+        Mock Get-ScheduledTask { $script:principalTask }
+        BeforeEach {
+            $script:principalContext=Get-GfrContext
+            $script:principalContext.Sid='S-1-5-21-3926228357-1868843804-2423023326-1001'
+            $script:principalContext.TaskName='GFR-Whisper-'+$script:principalContext.Sid
+            $script:principalContext.Description='Greenwich Fire Responder local Whisper v1; owner '+$script:principalContext.Sid
+            $script:principalTask=[pscustomobject]@{TaskName=$script:principalContext.TaskName;TaskPath='\';State='Ready';Description=$script:principalContext.Description
+                Principal=[pscustomobject]@{UserId='User';LogonType='Interactive';RunLevel='Limited'}
+                Actions=@([pscustomobject]@{Execute=$script:principalContext.Shell;WorkingDirectory=$script:principalContext.Data;Arguments=(Get-GfrTaskArguments $script:principalContext)})}
+        }
+        It 'accepts the real normalized User principal and its qualified and SID forms' {
+            Set-StrictMode -Version Latest
+            foreach ($name in @('User','DKFIRE-7090\User','.\User',$script:principalContext.Sid)) {
+                $script:principalTask.Principal.UserId=$name
+                (Get-GfrOwnedTask $script:principalContext).State | Should Be 'Ready'
+            }
+            Assert-MockCalled ConvertTo-GfrAccountSid -ParameterFilter {$Account -eq ([Environment]::MachineName+'\User')} -Times 2 -Scope It
+        }
+        It 'rejects the same short username under another machine or domain' {
+            foreach ($name in @('OTHERPC\User','OTHERDOMAIN\User','S-1-5-21-111-222-333-1001')) {
+                $script:principalTask.Principal.UserId=$name
+                { Get-GfrOwnedTask $script:principalContext } | Should Throw 'ownership mismatch'
+            }
+        }
+        It 'fails closed for missing or unresolvable principals' {
+            foreach ($name in @('','unknown-account')) {
+                $script:principalTask.Principal.UserId=$name
+                { Get-GfrOwnedTask $script:principalContext } | Should Throw 'could not be resolved'
+            }
+        }
+        It 'still rejects altered path, privilege and action fields' {
+            $script:principalTask.TaskPath='\Other\'
+            { Get-GfrOwnedTask $script:principalContext } | Should Throw
+            $script:principalTask.TaskPath='\'
+            $script:principalTask.Principal.RunLevel='Highest'
+            { Get-GfrOwnedTask $script:principalContext } | Should Throw
+            $script:principalTask.Principal.RunLevel='Limited'
+            $script:principalTask.Actions[0].WorkingDirectory='C:\foreign'
+            { Get-GfrOwnedTask $script:principalContext } | Should Throw
         }
     }
     Describe 'Stop and uninstall mocks' {
