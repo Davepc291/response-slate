@@ -23,6 +23,7 @@ backups/
 # Logs and temporary files.
 logs/
 *.log
+*.log.*
 tmp/
 temp/
 .tmp/

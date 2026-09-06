@@ -2,6 +2,14 @@
 
 ## Optional remote speech-to-text
 
+For the verified Windows whisper.cpp runtime, optional per-user Task Scheduler
+management is provided under [ops/windows/whisper](../ops/windows/whisper/README.md).
+It binds only `127.0.0.1:8001` and uses small.en, English, CPU-only inference with
+8 threads and one processor. Installation is manual and separate from API startup;
+transcription remains disabled by default. Set `GFR_TRANSCRIPTION_BASE_URL` to
+`http://127.0.0.1:8001` in the API process environment when opting in. The guide
+covers validation, bounded logs/restarts, exact task targeting, status, and rollback.
+
 Apply migration `000004` before enabling transcription. A separate serial worker
 polls successfully analyzed canonical transmissions in `GFR_RECORDINGS_DIR` once
 per second. It never scans other directories or transcribes audio aliases. The

@@ -1,5 +1,25 @@
 # PostgreSQL development
 
+## Optional Windows local Whisper management
+
+See [the Windows runtime guide](../ops/windows/whisper/README.md) for the exact
+manual installation, start, status, stop, and rollback procedures. Registration
+uses Windows Task Scheduler under the current user and does not start the server.
+No third-party service wrapper is required. Run its preview/tests before any later
+installation; no task is registered by tests.
+
+The managed runtime uses `127.0.0.1:8001` only, small.en/English, CPU-only, eight
+threads, one processor, and FFmpeg conversion in a dedicated user-local directory.
+Paths derive from the current profile or validated absolute parameters. The model's
+exact SHA-1 is checked before registration. An occupied port causes refusal; the
+scripts never stop the pre-existing manual server or the Linux service.
+
+Runtime stdout/stderr have bounded rotation outside the repository. Uninstall
+retains logs and runtime files unless its separate cleanup switch is requested.
+The task requires a logged-on user; it does not provide a pre-logon system service.
+Configure the API's process environment explicitly and keep its existing database
+configuration private. Neither these scripts nor the API automatically loads `.env`.
+
 ## Remote transcription verification
 
 The optional speech provider is configurable shared infrastructure, not part of
