@@ -1,5 +1,59 @@
 # Local development database
 
+## Migration 000006: append-only transcript review
+
+Apply once after `000005` to the existing local development PostgreSQL service.
+Migrations 000001–000005 remain unchanged. This migration records version 000006
+atomically and adds no reference reviews or operational transcripts.
+
+`transcript_dataset_items` has a natural canonical-fingerprint primary key,
+unique transmission linkage, and generated immutable 80/10/10 split.
+`transcript_reviews` has generated bigint IDs, server-assigned review timestamps,
+explicit reviewer/verdict/reference fields, exact attempt/model/raw-text snapshots,
+and composite foreign keys to the dataset item and exact transmission/attempt.
+Before-insert validation requires analyzed canonical audio, a PCM fingerprint,
+completed transcription and a completed matching attempt. Raw snapshots and model
+are copied from the selected attempt, never trusted from submission values.
+Unknown IDs, aliases, missing fingerprints, mismatched attempts and incomplete
+transcriptions are rejected. Accepted references and excluded reasons must be
+nonblank; text sizes and controls are constrained.
+
+`transcript_review_candidates` selects each eligible transmission's latest
+successful attempt. `transcript_review_latest` selects the highest review ID
+across every verdict, so exclusion/follow-up supersedes previous acceptance.
+Indexes support candidate selection, review history, attempt references, verdicts,
+and split/export lookup. See [the CLI workflow and split/export definitions](../backend/README.md#step-3a-local-human-transcript-review).
+
+Both dataset items and review history reject UPDATE, DELETE, and TRUNCATE through
+ENABLE ALWAYS statement triggers, consistent with the existing decision audit.
+Parent guards preserve reviewed attempt text/model/settings/outcome and canonical
+eligibility/metadata. Foreign keys prevent deletion or changing referenced identity.
+Supersede mistakes by inserting a new review; never delete prior history.
+Highest ID is the deterministic ordering rule, not a guarantee of concurrent
+transaction commit order. Normal API transcription behavior remains unchanged.
+
+These are database protections, not cryptographic attestation of a human action.
+A table owner/superuser can change schema, disable triggers, or restore altered
+data. ENABLE ALWAYS also runs under replica session mode but does not override
+owner authority. Use separate least-privilege roles before broader deployment;
+the local development owner is not a production security boundary. Retention and
+exceptional privacy removal remain separately scoped.
+
+```powershell
+Get-Content -Raw database/migrations/000006_transcript_review.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Review migration failed.' }
+Get-Content -Raw database/tests/000006_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Review schema tests failed.' }
+```
+
+Check `schema_migrations` before applying: rerunning this migration fails and rolls
+back; the API and CLI never auto-migrate. Run existing SQL suites 000001–000005 as
+well when initially applying this schema. All six suites use synthetic fixtures
+and roll back, including simulated references. They do not fabricate permanent
+human-reviewed truth. Identity sequences may advance despite rollback.
+
 ## Migration 000005: transcription monitoring
 
 Apply once after `000004`, checking `schema_migrations` first. Existing numbered

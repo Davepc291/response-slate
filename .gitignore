@@ -32,3 +32,13 @@ temp/
 *.swp
 *.swo
 *~
+
+# Private human-review material and generated dataset exports.
+review-data/
+dataset-exports/
+*.jsonl
+*.reference.txt
+*.review.txt
+recordings/
+*.mp3
+*.wav

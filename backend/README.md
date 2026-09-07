@@ -1,5 +1,136 @@
 # Greenwich Fire Responder V3 backend
 
+## Step 3A: local human transcript review
+
+`cmd/transcript-review` provides `queue`, `show`, `submit`, `history`, `stats`, and
+`export`. It starts no server, opens no applications, plays no audio, copies no
+recordings, and sends no Whisper requests. Step 3A collects explicit human reference
+evidence. Accuracy scoring/evaluation belongs to later Step 3B; prompt/vocabulary
+tuning and the RID/status classifier are not part of this milestone.
+
+Apply migration `000006` using [database/README.md](../database/README.md). Privately
+set the existing `GFR_DATABASE_URL` in the process environment to the local
+development database, with `sslmode=disable` for the existing local Compose setup.
+The CLI accepts only loopback PostgreSQL URLs and rejects host overrides to other
+machines. It does not load `.env`. `GFR_REVIEW_DB_TIMEOUT` defaults to `10s`, accepts
+`1s` through `30s`, and bounds the whole command including connection acquisition;
+individual connection attempts are capped at three seconds. Errors omit driver
+details, credentials, and file paths.
+
+From `backend/`, a real person performs this workflow:
+
+```powershell
+go run ./cmd/transcript-review queue --limit 25
+$transmissionId = Read-Host 'Transmission ID from queue'
+go run ./cmd/transcript-review show --id $transmissionId
+$attemptId = Read-Host 'Exact transcription_attempt_id shown above'
+$reviewer = Read-Host 'Public reviewer label (not a secret)'
+```
+
+Only explicit `show --id` returns the local source path and exact raw model text.
+The person must manually listen to that recording in a trusted player and compare
+the evidence. Nothing in the CLI verifies listening or infers corrections.
+Never guess missing words from Whisper alone; use follow-up or exclusion when
+the recording cannot support a reliable reference.
+
+Create a private correction file without overwriting an existing one:
+
+```powershell
+$reviewDir = Join-Path $env:LOCALAPPDATA 'GreenwichFireResponder\review-data'
+New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
+$reference = Join-Path $reviewDir 'reference.txt'
+New-Item -ItemType File -Path $reference -ErrorAction Stop | Out-Null
+```
+
+Manually edit that file as UTF-8 with the words actually heard, then save it. A
+UTF-8 BOM is accepted and removed as encoding metadata; other text and whitespace
+are retained exactly. Maximum reference size is 65,536 UTF-8 bytes. Invalid UTF-8,
+controls other than tab/CR/LF, Unicode format controls, symlinks/reparse points,
+linked ancestors, missing files, and unsafe paths are rejected. File arguments
+must be clean absolute local paths with existing parent directories.
+
+```powershell
+go run ./cmd/transcript-review submit --id $transmissionId --attempt $attemptId --reviewer $reviewer --verdict accepted --text-file $reference --confirm-human
+go run ./cmd/transcript-review history --id $transmissionId --limit 50
+go run ./cmd/transcript-review stats
+```
+
+`--confirm-human` is an explicit acknowledgment, not identity verification. Do not
+use it for automated or guessed corrections. Reviewer labels are mandatory,
+nonblank, at most 80 UTF-8 bytes, and must not contain secrets. Optional `--notes`
+allows 4,096 bytes; `--reason` allows 1,024 bytes. The correction itself is accepted
+only through `--text-file`, never a command-line text argument.
+
+| Verdict | Meaning |
+| --- | --- |
+| `accepted` | Person submitted a nonblank reference after reviewing the recording. Eligible for export only while this is the latest review. |
+| `excluded` | Omit from the accepted dataset; requires a nonblank `--reason`. |
+| `needs_followup` | Unresolved review, never accepted dataset truth; reference text is optional. |
+
+To withdraw mistaken accepted truth, append a superseding review:
+
+```powershell
+go run ./cmd/transcript-review submit --id $transmissionId --attempt $attemptId --reviewer $reviewer --verdict needs_followup --notes 'Needs another listening review' --confirm-human
+# Or exclude with a human-supplied reason:
+go run ./cmd/transcript-review submit --id $transmissionId --attempt $attemptId --reviewer $reviewer --verdict excluded --reason 'Recording cannot support a reliable reference' --confirm-human
+```
+
+History is never deleted or rewritten. Highest review ID wins across **all**
+verdicts; filtering accepted happens afterward. A later follow-up/exclusion removes
+an earlier acceptance from exports. Queue includes eligible records whose latest
+review is not accepted, including excluded records for deliberate re-review;
+it shows latest verdict but no source path, filename, RID, or transcript. Queue
+limits are 1–200 (default 25); history limits are 1–500 (default 50), newest first.
+Stats counts latest accepted/excluded/follow-up/unreviewed eligible recordings,
+plus accepted train/validation/test counts, not all historical review events.
+
+Export accepted latest references to private JSONL:
+
+```powershell
+$export = Join-Path $reviewDir 'dataset.jsonl'
+go run ./cmd/transcript-review export --output $export --limit 100
+# Deliberately replace an existing export only when intended:
+go run ./cmd/transcript-review export --output $export --limit 100 --overwrite
+```
+
+Export streams in canonical-fingerprint order, default 100 and maximum 1,000
+records. The reported limit may truncate a larger accepted dataset; increase it
+explicitly within the bound. A same-directory temporary file is flushed before
+publication. Windows uses a no-replace rename unless `--overwrite` is supplied;
+Unix uses atomic hard-link publication for no-replace and rename for overwrite.
+Failures before publication preserve the old target and remove temporary files.
+Existing exports, directories, reparse/symlink targets and linked ancestors are
+checked; only `.jsonl` targets are allowed. Use a private local directory protected
+from concurrent hostile filesystem changes. Power loss or forced termination may
+leave an uncommitted temporary file; this is not a crash-proof archival system.
+
+Each JSONL record contains only `dataset_id`, `audio_fingerprint`,
+`transcription_attempt_id`, `channel`, `tgid`, `duration_ms`,
+`raw_model_transcript`, `human_reference_transcript`, `model`, `split`, and
+`reviewed_at` (UTC). Model identifiers are bounded tokens, not URLs or binary
+version attestations. No path, filename, RID, reviewer label, notes, reason,
+provider URL, settings, token, database error, or audio bytes are exported.
+`dataset_id` is `gfr-audio-v1:` plus MD5 of the canonical fingerprint; the full
+canonical PCM SHA-256 fingerprint is also retained for integrity and deduplication.
+
+Split policy v1 assigns `first_32_bits(MD5(fingerprint)) % 100`: 0–79 train,
+80–89 validation, 90–99 test, approximately **80/10/10**. MD5 is a deterministic
+distributor, not a security hash. One immutable dataset item exists per canonical
+audio fingerprint; aliases cannot enter the dataset or cross splits. Small
+datasets need not match the ratio exactly. Keep the existing canonical decoding
+policy consistent; a future fingerprint/split policy needs a separate migration.
+
+Operational raw and corrected transcript text can contain sensitive locations,
+names, or other information despite metadata minimization. The export preserves
+evidence rather than redacting text automatically. Review its contents before
+sharing; never use reviewer labels or notes for secrets. Live transcripts,
+corrections, recordings, and generated exports must never be committed. Root
+`.gitignore` excludes JSONL, private review directories, and designated correction
+suffixes; it cannot stop `git add -f` or content saved under unrelated extensions.
+Append-only storage retains withdrawn references; privacy deletion/retention and
+authenticated reviewer identities require a separately authorized future policy.
+Raw and corrected transcripts are evidence, **never CAD commands**.
+
 ## Transcription operations monitoring
 
 Apply migration `000005` before running this version; see

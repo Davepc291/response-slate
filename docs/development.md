@@ -1,5 +1,53 @@
 # PostgreSQL development
 
+## Step 3A human-reference dataset
+
+Step 3A adds only the local review workflow and immutable dataset foundation;
+Step 3B accuracy evaluation, later prompt tuning, and classification are separate.
+See [the complete human procedure](../backend/README.md#step-3a-local-human-transcript-review)
+and [migration 000006](../database/README.md#migration-000006-append-only-transcript-review).
+No HTTP service, player, editor, classifier, WebSocket, incident, or CAD component
+is started by the review CLI. It neither reads audio nor contacts Whisper.
+
+A real person must use `show` to select one canonical recording, listen manually,
+and write a UTF-8 correction based on the audio. `submit` requires the exact
+transmission/attempt IDs, reviewer label, verdict and `--confirm-human`; acceptance
+also requires a nonblank `--text-file`. Use `needs_followup` or `excluded` when
+truth is uncertain. Never generate a reference from model output alone. Append a
+superseding review to withdraw a mistake; inspect `history` to retain the audit.
+Only a latest accepted review enters export, with its immutable content-derived
+split. Private transcript text and exports must never enter Git or be interpreted
+as status/CAD commands. Ignored files are not encrypted or access-controlled.
+
+Ordinary tests use fakes and temporary synthetic files:
+
+```powershell
+# From backend/:
+go vet ./...
+go test ./...
+```
+
+The safe opt-in integration test uses an existing local database URL supplied
+privately in the process environment. It expects the verified 21-transmission,
+23-attempt, zero-decision baseline and no existing dataset items/reviews:
+
+```powershell
+$env:GFR_REVIEW_LIVE_TEST = 'true'
+go test ./internal/transcriptreview -run '^TestControlledReviewCLI$' -count=1 -v -timeout 60s
+Remove-Item Env:GFR_REVIEW_LIVE_TEST
+```
+
+This exercises the production command dispatcher and PostgreSQL store for queue,
+show, submit, history, stats and export in one **rolled-back transaction**. Every
+submission is explicitly labeled synthetic and is not human-reviewed truth.
+It verifies bounded output, exact raw text, four superseding reviews, accepted-only
+exports, stable ordering/splits, metadata privacy, and unchanged baseline content
+digests. Only its exact temporary correction/export files and directory are
+removed. No source recording or Whisper endpoint is accessed. Ordinary runs skip
+this opt-in test. Forced termination still rolls back an uncommitted connection,
+but temporary files may need inspection. Never disable audit triggers to clean up
+a real review; supersede it instead.
+
 ## Transcription monitoring and recovery
 
 Apply migration `000005` and run all five transactional SQL suites in
