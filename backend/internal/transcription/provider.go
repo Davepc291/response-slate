@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -94,6 +95,11 @@ func (p *HTTPProvider) Transcribe(parent context.Context, f *os.File) (Result, e
 		writer.CloseWithError(err)
 	}()
 	defer func() { reader.Close(); <-done }()
+	started := time.Now()
+	if measurement, ok := parent.Value(measurementKey{}).(*RequestMeasurement); ok {
+		measurement.StartedAt = started.UTC()
+		defer func() { measurement.Duration = time.Since(started) }()
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		if parent.Err() != nil {

@@ -15,6 +15,7 @@ import (
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/database"
 	"greenwich-fire-responder/backend/internal/httpapi"
+	"greenwich-fire-responder/backend/internal/operations"
 	"greenwich-fire-responder/backend/internal/recordings"
 	"greenwich-fire-responder/backend/internal/transcription"
 )
@@ -49,13 +50,17 @@ func runWithConfig(ctx context.Context, cfg config.Config, transport http.RoundT
 	ingestionCtx, cancelIngestion := context.WithCancel(ctx)
 	ingestionDone := make(chan struct{})
 	transcriptionDone := make(chan struct{})
+	monitor := operations.New(db, cfg.Recordings.Directory, cfg.Transcription.MaxAttempts, cfg.Transcription.Enabled, cfg.Operations, logger)
+	monitorDone := make(chan struct{})
+	go func() { defer close(monitorDone); monitor.Run(ingestionCtx) }()
+	defer func() { cancelIngestion(); <-monitorDone }()
 	if cfg.Transcription.Enabled && cfg.Recordings.Directory != "" {
 		provider, err := transcription.NewHTTPProvider(cfg.Transcription, transport)
 		if err != nil {
 			cancelIngestion()
 			return err
 		}
-		worker := &transcription.Worker{Options: cfg.Transcription, Directory: cfg.Recordings.Directory, Store: db, Provider: provider, Logger: logger}
+		worker := &transcription.Worker{Options: cfg.Transcription, Directory: cfg.Recordings.Directory, Store: db, Provider: provider, Logger: logger, Monitor: monitor}
 		go func() { defer close(transcriptionDone); defer provider.Close(); worker.Run(ingestionCtx) }()
 	} else {
 		logger.Info("transcription", "outcome", "disabled")
@@ -84,7 +89,7 @@ func runWithConfig(ctx context.Context, cfg config.Config, transport http.RoundT
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db),
+		Handler:           httpapi.NewHandler(db, monitor),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

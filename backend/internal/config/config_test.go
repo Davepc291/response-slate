@@ -8,6 +8,7 @@ import (
 
 	"greenwich-fire-responder/backend/internal/audioanalysis"
 	"greenwich-fire-responder/backend/internal/config"
+	"greenwich-fire-responder/backend/internal/operations"
 	"greenwich-fire-responder/backend/internal/recordings"
 	"greenwich-fire-responder/backend/internal/transcription"
 )
@@ -31,6 +32,7 @@ func TestLoad(t *testing.T) {
 			tc.want.Recordings = recordings.DefaultOptions()
 			tc.want.Audio = audioanalysis.DefaultOptions()
 			tc.want.Transcription = transcription.DefaultOptions()
+			tc.want.Operations = operations.DefaultOptions()
 			t.Setenv("GFR_HTTP_ADDR", tc.addr)
 			t.Setenv("GFR_DATABASE_URL", tc.url)
 			t.Setenv("GFR_DATABASE_REQUIRED", tc.required)
@@ -69,6 +71,9 @@ func TestLoadDoesNotReadDotEnv(t *testing.T) {
 
 func clearRecordingEnv(t *testing.T) {
 	t.Helper()
+	for _, name := range []string{"QUEUE_DEPTH", "OLDEST_AGE", "REQUEST_DURATION", "CONSECUTIVE_FAILURES"} {
+		t.Setenv("GFR_MONITOR_WARN_"+name, "")
+	}
 	for _, name := range []string{"ENABLED", "BASE_URL", "MODEL", "LANGUAGE", "BEARER_TOKEN", "PROMPT", "WORD_BOOST", "TIMEOUT", "RETRY_DELAY", "MAX_RESPONSE_BYTES", "MAX_AUDIO_BYTES", "MAX_ATTEMPTS"} {
 		t.Setenv("GFR_TRANSCRIPTION_"+name, "")
 	}

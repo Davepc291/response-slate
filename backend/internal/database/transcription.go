@@ -69,7 +69,12 @@ func (db *DB) FinishTranscription(ctx context.Context, j transcription.Job, r tr
 		retry = safe.Retryable
 	}
 	var saved bool
-	err := q.QueryRow(ctx, `SELECT finish_transcription($1,$2::uuid,$3,$4,$5,$6,$7)`, j.ID, j.Claim, raw, text, code, retry, int(delay.Seconds())).Scan(&saved)
+	var requestStart, requestMS any
+	if !j.Measurement.StartedAt.IsZero() {
+		requestStart = j.Measurement.StartedAt
+		requestMS = float64(j.Measurement.Duration) / float64(time.Millisecond)
+	}
+	err := q.QueryRow(ctx, `SELECT finish_transcription_observed($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9)`, j.ID, j.Claim, raw, text, code, retry, int(delay.Seconds()), requestStart, requestMS).Scan(&saved)
 	if err != nil {
 		return false, ErrUnavailable
 	}

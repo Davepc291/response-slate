@@ -1,5 +1,57 @@
 # PostgreSQL development
 
+## Transcription monitoring and recovery
+
+Apply migration `000005` and run all five transactional SQL suites in
+[database/README.md](../database/README.md). The API does not load `.env` or migrate
+automatically. See [the backend monitoring reference](../backend/README.md#transcription-operations-monitoring)
+for all measurement definitions, units, thresholds, JSON fields, and limitations.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/operations/transcription
+```
+
+Backlog is eligible waiting work, not proof of a failed provider. Compare queue
+depth and age with worker activity, recent HTTP durations, timeout/retry counts,
+and provider evidence. A recent success expires to stale after 60 seconds; an old
+successful timestamp never guarantees current health. Requesting plus an active
+claim indicates work underway. Worker disabled is intentional if transcription
+or the recordings directory is unset. Historical metrics remain available for a
+configured directory when disabled. Provider errors do not affect database-only
+readiness. Database-query failure gives safe HTTP 503 with no metrics.
+
+When backlog grows, inspect recent durations and the managed local status script;
+do not restart services merely because a queue exists. When provider failures
+appear, verify `http://127.0.0.1:8001` and the local runtime logs separately, then
+allow the existing bounded retry policy to run. Recovery emits a single event
+when a request succeeds. Failed/exhausted jobs require review; monitoring never
+resets attempts, replays files, changes unit state, or creates incidents. If metrics
+are unavailable, check PostgreSQL health, migration version, directory scope, and
+query capacity. Do not print database URLs or credentials in troubleshooting.
+
+Controlled managed-provider verification is explicitly opt-in. Privately supply
+the local `GFR_DATABASE_URL`, enable required database and transcription, use the
+loopback provider with small.en/English, and set:
+
+```powershell
+$env:GFR_LIVE_MONITORING_TEST = 'true'
+$env:GFR_LIVE_SOURCE = 'C:\Users\User\SDRTrunk\recordings\<eligible-native-filename>.mp3'
+# From backend/, with FFmpeg and FFprobe in PATH:
+go test ./cmd/api -run '^TestControlledLiveMonitoring$' -count=1 -v -timeout 240s
+Remove-Item Env:GFR_LIVE_MONITORING_TEST
+Remove-Item Env:GFR_LIVE_SOURCE
+```
+
+The test refuses an existing canonical audio fingerprint. It copies only after
+the empty startup snapshot, observes monitoring before/during/after, counts one
+request with an audited transport, re-observes the temporary path, and gracefully
+cancels the API. Deferred cleanup removes only its exact temporary rows and copy,
+checks original hash/size/mtime, and leaves managed Whisper running. It never
+contacts Linux. Normal tests skip this test and use fakes. Provider timing includes
+network/upload/response overhead; queue samples are not a durable time series.
+The endpoint has no sensitive labels or raw transcripts. Warnings are observations
+only: no classifier, board, incident, WebSocket, or CAD actions are implemented.
+
 ## Optional Windows local Whisper management
 
 See [the Windows runtime guide](../ops/windows/whisper/README.md) for the exact

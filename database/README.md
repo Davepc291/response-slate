@@ -1,5 +1,40 @@
 # Local development database
 
+## Migration 000005: transcription monitoring
+
+Apply once after `000004`, checking `schema_migrations` first. Existing numbered
+migrations are unchanged. This transactional migration adds nullable
+`provider_request_started_at` (`timestamptz`) and `provider_request_duration_ms`
+(finite nonnegative milliseconds) to attempts, a directory-expression index,
+`finish_transcription_observed`, and the fixed-shape aggregate function
+`transcription_operations`. No legitimate rows are removed or rewritten with
+invented timing. Legacy finish callers work unchanged with NULL request timing.
+Rerunning the migration fails and rolls back; it is not an automatic startup step.
+
+The observed finish wrapper uses the existing claim fence and updates timing only
+if completion was accepted, in the same transaction. Its paired-field constraint
+rolls back completion on invalid timing. Source-path idempotency and canonical
+audio fingerprints are unchanged. Summaries use the latest 100 finished attempts;
+counts cover the configured direct-child directory scope. See
+[measurement definitions](../backend/README.md#transcription-operations-monitoring).
+
+Run only against the existing local development Compose service:
+
+```powershell
+Get-Content -Raw database/migrations/000005_transcription_monitoring.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000005 failed.' }
+Get-Content -Raw database/tests/000005_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Monitoring schema tests failed.' }
+```
+
+Also run tests 000001 through 000004 below. All five suites roll back fixtures;
+identity sequences may advance. Monitoring tests cover empty/scoped queues,
+oldest age, active claims, delayed retries, timeout/attempt/failed/skipped counts,
+timing summaries, atomic rollback, late completion, and privacy. No audio bytes,
+provider URLs, credentials, or headers are stored in the new telemetry.
+
 ## Migration 000004: remote transcription
 
 Apply only to this repository's existing **local development** PostgreSQL

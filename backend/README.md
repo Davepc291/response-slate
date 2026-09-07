@@ -1,5 +1,99 @@
 # Greenwich Fire Responder V3 backend
 
+## Transcription operations monitoring
+
+Apply migration `000005` before running this version; see
+[database instructions](../database/README.md). No automatic migrations or `.env`
+loading occurs. `GET /api/operations/transcription` returns fixed-shape operational
+JSON, `Cache-Control: no-store`, and a UTC `observed_at`. It never returns raw
+transcripts, filenames, paths, RIDs, model/user labels, credentials, or provider
+URLs. Keep the default loopback binding; authentication is still a later milestone.
+
+Metrics cover only direct children of `GFR_RECORDINGS_DIR`, using the same exact
+path scope as transcription selection. With no directory configured, this is an
+empty scope. Monitoring still runs when transcription is disabled. Queries have
+a two-second deadline. Query failure returns HTTP 503 with
+`status=database_unavailable`, `metrics=null`, and no internal error detail.
+All other monitoring states return HTTP 200. `/api/health` and `/api/ready` retain
+their existing contracts: backlog or provider failure never makes database
+readiness fail.
+
+| Field | Meaning |
+| --- | --- |
+| `waiting_jobs` | Analyzed canonical jobs with pending/failed/expired-processing status, retryable, and no future retry/lease deadline. Includes expired final claims awaiting exhaustion bookkeeping, just like worker selection. |
+| `oldest_waiting_age_ms` | Database observation time minus oldest eligible job's metadata `created_at`, clamped at zero; NULL for an empty queue. Includes analysis and any prior retry delay, not radio recording age. |
+| `processing_jobs` | Claims with processing status and an unexpired lease. A crashed worker may remain counted until lease expiry. |
+| `retry_waiting_jobs` | Retryable failed jobs whose next attempt is not yet due. Excluded from `waiting_jobs`. |
+| `completed_jobs`, `failed_jobs`, `skipped_jobs` | Current transcription row states in scope; failed includes both retryable and permanent failures. Skipped includes content aliases. |
+| `attempt_count` | All persisted claim attempts in scope, including interrupted attempts and source failures before HTTP. |
+| `retry_count` | Attempts numbered greater than one, not retries merely scheduled for the future. |
+| `timeout_count` | Attempts whose safe error code is `provider_timeout`; not distinct jobs. |
+| `last_success_at`, `last_provider_failure_at` | Latest persisted finished attempt timestamps; provider failures include unavailable, timeout, rejected, and invalid-response outcomes. NULL if none. |
+
+`recent_timings` covers the **latest 100 finished attempts** in scope. Each of its
+five fields contains `samples`, `mean_ms`, `p95_ms` (continuous percentile), and
+`max_ms`; absent measurements have zero samples and NULL summary values:
+
+- `ingestion_to_claim`: attempt `started_at` minus metadata `created_at`, including
+  analysis time and retries. Each retry is a separate sample.
+- `claim_to_request`: client request-start UTC timestamp minus PostgreSQL attempt
+  `started_at`. Negative clock skew is clamped at zero.
+- `provider_request`: monotonic client duration immediately before `Client.Do`
+  through response read/validation. Includes connection, upload, network, and
+  server execution; excludes source opening and multipart setup. This is not
+  server-only inference time.
+- `claim_to_completion`: successful attempt `finished_at` minus `started_at`.
+- `ingestion_to_completion`: successful attempt `finished_at` minus metadata
+  `created_at`. Both completion summaries exclude unsuccessful attempts.
+
+Request timings are nullable for historical records, unissued requests, and
+crashes before completion persistence. They are never backfilled with estimates.
+The existing claim fence and the new wrapper persist outcome and timing in one
+transaction. Late/repeated completion cannot replace either. No transaction is
+held across HTTP. An uncertain commit/crash can still cause a repeated remote
+request, as before.
+
+`worker_state` is process-local: disabled, idle, claiming, preparing, requesting,
+persisting, database_unavailable, or stopped. `provider_state` is unknown until an
+actual request outcome, then recent_success or recent_failure, and stale after
+60 seconds. No provider health probes are issued by monitoring. `healthy_idle`
+and `healthy_backlog` mean recent successful request evidence, **not guaranteed
+current availability**. Other top-level states are provider_unknown,
+provider_unavailable, worker_disabled, and database_unavailable. Worker disabled
+takes precedence over provider evidence; database-query failure takes precedence
+over both. `consecutive_provider_failures` counts completed provider-failure
+outcomes since the last success in this API process, not across restarts.
+
+Warnings are observational only and never change retries, readiness, unit state,
+incidents, or CAD. Set these process-environment values (invalid values fail
+startup with a safe error):
+
+| Variable | Default | Allowed |
+| --- | --- | --- |
+| `GFR_MONITOR_WARN_QUEUE_DEPTH` | `10` | 1–100000 jobs |
+| `GFR_MONITOR_WARN_OLDEST_AGE` | `30s` | 1s–24h |
+| `GFR_MONITOR_WARN_REQUEST_DURATION` | `15s` | 1ms–5m |
+| `GFR_MONITOR_WARN_CONSECUTIVE_FAILURES` | `3` | 1–100 outcomes |
+
+Thresholds trigger at **greater than or equal to** the configured value. A
+background monitor samples every five seconds; endpoint reads also refresh queue
+warnings. Fixed-key structured `transcription_monitor` logs report backlog,
+oldest_job_age, slow_provider_request, provider_timeout, retry, provider_failures,
+and metrics_unavailable transitions. Repeated active conditions do not repeat
+warnings; clearing the condition logs `active=false`. One provider_recovery event
+is emitted on success after a failure streak. Existing per-attempt audit logs
+remain; database claim polling errors now log once per failure episode. A brief
+queue peak may not be seen between samples. Aggregates scan historical scoped
+evidence and may time out on a very large database; the response remains bounded.
+
+Example (excerpt; timing objects omitted here for brevity):
+
+```json
+{"status":"healthy_idle","database":"ok","worker_state":"idle","provider_state":"recent_success","consecutive_provider_failures":0,"observed_at":"2026-09-07T02:00:00Z","metrics":{"waiting_jobs":0,"oldest_waiting_age_ms":null,"processing_jobs":0,"retry_waiting_jobs":0,"completed_jobs":1,"failed_jobs":0,"skipped_jobs":0,"attempt_count":1,"retry_count":0,"timeout_count":0}}
+```
+
+For verification and recovery, see [development operations](../docs/development.md#transcription-monitoring-and-recovery).
+
 ## Optional remote speech-to-text
 
 For the verified Windows whisper.cpp runtime, optional per-user Task Scheduler

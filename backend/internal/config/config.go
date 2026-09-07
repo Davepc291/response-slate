@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"greenwich-fire-responder/backend/internal/audioanalysis"
+	"greenwich-fire-responder/backend/internal/operations"
 	"greenwich-fire-responder/backend/internal/recordings"
 	"greenwich-fire-responder/backend/internal/transcription"
 )
@@ -20,6 +21,7 @@ type Config struct {
 	Recordings       recordings.Options
 	Audio            audioanalysis.Options
 	Transcription    transcription.Options
+	Operations       operations.Options
 }
 
 // Load does not read .env files. Errors never contain environment values.
@@ -30,6 +32,7 @@ func Load() (Config, error) {
 		Recordings:    recordings.DefaultOptions(),
 		Audio:         audioanalysis.DefaultOptions(),
 		Transcription: transcription.DefaultOptions(),
+		Operations:    operations.DefaultOptions(),
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = "127.0.0.1:8080"
@@ -100,7 +103,38 @@ func Load() (Config, error) {
 	if err := loadTranscription(&cfg.Transcription); err != nil {
 		return Config{}, err
 	}
+	if err := loadOperations(&cfg.Operations); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func loadOperations(o *operations.Options) error {
+	invalid := errors.New("invalid operations warning configuration")
+	for key, target := range map[string]*time.Duration{"OLDEST_AGE": &o.OldestAge, "REQUEST_DURATION": &o.RequestDuration} {
+		if v := os.Getenv("GFR_MONITOR_WARN_" + key); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return invalid
+			}
+			*target = d
+		}
+	}
+	if v := os.Getenv("GFR_MONITOR_WARN_QUEUE_DEPTH"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return invalid
+		}
+		o.QueueDepth = n
+	}
+	if v := os.Getenv("GFR_MONITOR_WARN_CONSECUTIVE_FAILURES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return invalid
+		}
+		o.ConsecutiveFailures = n
+	}
+	return o.Validate()
 }
 
 func loadTranscription(o *transcription.Options) error {
