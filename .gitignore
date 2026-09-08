@@ -39,6 +39,7 @@ dataset-exports/
 *.jsonl
 *.reference.txt
 *.review.txt
+*.experiment-summary.json
 recordings/
 *.mp3
 *.wav

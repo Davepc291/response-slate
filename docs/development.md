@@ -426,3 +426,12 @@ prints only aggregate metrics and the input SHA-256 and does not persist data.
 See [offline evaluation instructions and exact metric definitions](offline-transcription-evaluation.md).
 Validation is unavailable for the current export with zero validation records;
 this milestone does not authorize promotion or operational decisions.
+
+## Step 4B1: local experiment harness
+
+The separate `transcript-experiment` CLI supports a future controlled comparison
+using read-only database evidence and the fixed local Windows Whisper endpoint.
+It is not part of the API or production worker. Follow the explicit split,
+private output, and credential workflow in
+[transcription experiments](transcription-experiments.md). Do not run a live
+experiment as part of installation or ordinary tests.

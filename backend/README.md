@@ -678,3 +678,12 @@ JSON only. It never loads `.env`, copies transcripts, or changes the dataset.
 See [metric definitions, input bounds, and limitations](../docs/offline-transcription-evaluation.md).
 The current 14 train / 2 test / 0 validation export has no validation evidence and
 does not establish promotion readiness. Existing review/export behavior is unchanged.
+
+## Step 4B1: controlled transcription experiments
+
+`cmd/transcript-experiment` is a separate opt-in CLI for a future local no-prompt
+versus candidate-prompt comparison. It requires explicit private dataset,
+recordings directory, output, name, and split arguments. Production workers are
+unchanged. See [the safe manual commands, boundaries, and limitations](../docs/transcription-experiments.md).
+Implementation tests use synthetic data only; building this harness does not run
+an experiment or authorize use of the held-out test split.
