@@ -416,3 +416,13 @@ The worker is serial, so slow analysis delays subsequent directory scans while t
 HTTP API remains responsive. Content aliases must not be counted as extra logical
 transmissions. Optional transcription uses its own durable lease worker. No classification, status changes, incidents, or CAD writes
 are performed.
+
+## Step 4A: private offline accuracy evaluation
+
+Use the independent `backend/cmd/transcript-eval` CLI with an explicit `--dataset`
+path to a private review export. No PostgreSQL, Whisper, API, recordings, or
+network access is required. Keep datasets outside the repository; evaluation
+prints only aggregate metrics and the input SHA-256 and does not persist data.
+See [offline evaluation instructions and exact metric definitions](offline-transcription-evaluation.md).
+Validation is unavailable for the current export with zero validation records;
+this milestone does not authorize promotion or operational decisions.

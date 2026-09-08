@@ -663,3 +663,18 @@ in `../docs/development.md`.
   bounded retry orchestration, and unit tests behind small tool/store interfaces.
 
 The Angular application remains in `../web/` and runs separately.
+
+## Step 4A: offline transcription evaluation
+
+Evaluate a private Step 3A export without starting the API or connecting to any
+service. From `backend/`:
+
+```powershell
+go run ./cmd/transcript-eval --dataset "$env:LOCALAPPDATA\GreenwichFireResponder\review-data\dataset.jsonl"
+```
+
+This separate CLI requires an explicit absolute dataset path and emits aggregate
+JSON only. It never loads `.env`, copies transcripts, or changes the dataset.
+See [metric definitions, input bounds, and limitations](../docs/offline-transcription-evaluation.md).
+The current 14 train / 2 test / 0 validation export has no validation evidence and
+does not establish promotion readiness. Existing review/export behavior is unchanged.
