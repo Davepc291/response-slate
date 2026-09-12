@@ -53,11 +53,53 @@ func TestEmbeddedDictionary(t *testing.T) {
 
 func TestEmbeddedHashes(t *testing.T) {
 	for _, tc := range []struct{ text, hash string }{
-		{streetText, "909DBB45B763F29826F520126D89263461E8C74D8198BCA8CC0788258FCADB68"},
-		{accessRoadText, "68DA81578887B4C37785401928477418B768C4DE246AD982868E567CACB83CCB"},
+		{streetText, "991BEF76DA14A9763D23017912529002EF02468FB56DC437D07D8967352385D7"},
+		{accessRoadText, "DEDB1B166F16D5AB36EC01808BB3B4796501C0D7812AC70701267BC1117145B4"},
 	} {
-		if got := fmt.Sprintf("%X", sha256.Sum256([]byte(tc.text))); got != tc.hash {
-			t.Fatalf("embedded source bytes changed: %s", got)
+		lf := strings.ReplaceAll(tc.text, "\r\n", "\n")
+		crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+		for _, text := range []string{tc.text, lf, crlf} {
+			if got := normalizedHash(text); got != tc.hash {
+				t.Fatalf("normalized embedded content changed: %s", got)
+			}
+		}
+		lines := strings.Split(lf, "\n")
+		lines[0], lines[1] = lines[1], lines[0]
+		for _, changed := range []string{
+			"changed " + lf,           // Actual entry change, still lowercase text.
+			strings.Join(lines, "\n"), // Same entries, changed source ordering.
+			"\ufeff" + lf, " " + lf, lf + "\n", strings.TrimSuffix(lf, "\n"),
+			strings.Replace(lf, "\n", "\r", 1), // Bare CR is not normalized away.
+		} {
+			if normalizedHash(changed) == tc.hash {
+				t.Fatal("content/order change passed the pinned hash check")
+			}
+		}
+	}
+}
+
+// Normalize checkout line endings only. Do not trim, sort, lowercase, or
+// remove BOMs: all other bytes and source ordering remain protected by the pin.
+func normalizedHash(text string) string {
+	return fmt.Sprintf("%X", sha256.Sum256([]byte(strings.ReplaceAll(text, "\r\n", "\n"))))
+}
+
+func TestDictionaryLineEndingEquivalence(t *testing.T) {
+	streets := strings.ReplaceAll(streetText, "\r\n", "\n")
+	access := strings.ReplaceAll(accessRoadText, "\r\n", "\n")
+	want, err := load(streets, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{streets, strings.ReplaceAll(streets, "\n", "\r\n")} {
+		for _, a := range []string{access, strings.ReplaceAll(access, "\n", "\r\n")} {
+			got, err := load(s, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(want.Streets(), got.Streets()) || !reflect.DeepEqual(want.AccessRoads(), got.AccessRoads()) {
+				t.Fatal("line endings changed dictionary entries or lookup ordering")
+			}
 		}
 	}
 }
