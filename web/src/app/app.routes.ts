@@ -1,3 +1,5 @@
 import { Routes } from '@angular/router';
 
-export const routes: Routes = [];
+import { BoardPreview } from './board-preview/board-preview';
+
+export const routes: Routes = [{ path: '', component: BoardPreview }];

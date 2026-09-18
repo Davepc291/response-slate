@@ -1,0 +1,112 @@
+<div class="shadow-board">
+  <div class="alerts" role="status">
+    <p class="alert alert-shadow">{{ shadowWarning }}</p>
+    <p class="alert alert-synthetic">{{ syntheticWarning }}</p>
+  </div>
+
+  <header class="masthead">
+    <h1>{{ headerTitle }}</h1>
+    <p class="channels">
+      @for (channel of channels; track channel) {
+        <span class="badge badge-channel">{{ channel }}</span>
+      }
+      <span class="badge badge-evidence">evidence labels only</span>
+    </p>
+  </header>
+
+  <div class="layout">
+    <section class="primary" aria-label="Primary board">
+      <section class="panel pending" aria-label="Pending">
+        <h2>Pending</h2>
+        <p class="ref">{{ pending.reference }}</p>
+        <p class="headline">{{ pending.address }}</p>
+        <p>Call type: {{ pending.callType }}</p>
+        <p class="badge-row">
+          <span class="badge badge-channel">{{ pending.channel }}</span>
+          <span class="badge badge-tgid">TGID {{ pending.tgid }}</span>
+          <span class="badge badge-evidence">evidence only</span>
+        </p>
+        <p class="note">{{ pending.note }}</p>
+      </section>
+
+      <section class="panel active" aria-label="Active incident">
+        <h2>Active Incident</h2>
+        <p class="ref">{{ incident.reference }}</p>
+        <p class="headline">{{ incident.address }}</p>
+        <p>Address evidence: {{ incident.addressState }}</p>
+        <p>Call type: {{ incident.callType }} ({{ incident.callTypeState }})</p>
+        <p class="badge-row">
+          <span class="badge badge-channel">{{ incident.channel }}</span>
+          <span class="badge badge-tgid">TGID {{ incident.tgid }}</span>
+          <span class="badge badge-evidence">evidence only</span>
+        </p>
+        <p class="note">{{ incident.note }}</p>
+      </section>
+
+      <section class="panel roster" aria-label="Unit roster">
+        <h2>Unit Roster</h2>
+        <p class="note">{{ proposedNote }}</p>
+        <ol class="units">
+          @for (unit of roster; track unit.id) {
+            <li class="unit" [attr.data-status]="unit.statusKind">
+              <span class="unit-id">{{ unit.id }}</span>
+              <span class="unit-station">{{ unit.station }}</span>
+              <span class="unit-status">{{ unit.statusLabel }}</span>
+              @if (unit.proposed) {
+                <span class="unit-flag">proposed — not current apparatus state</span>
+              } @else {
+                <span class="unit-flag">synthetic display only</span>
+              }
+            </li>
+          }
+        </ol>
+        <p class="clock" aria-label="Current local clock">
+          Local clock: {{ now() | date: 'HH:mm:ss' }}
+        </p>
+      </section>
+
+      <section class="panel oos" aria-label="Out of service">
+        <h2>Out of Service</h2>
+        <p>{{ outOfService.label }}</p>
+        <p class="note">{{ outOfService.note }}</p>
+      </section>
+    </section>
+
+    <aside class="details" aria-label="Details">
+      <section class="panel card card-call" aria-label="Call details">
+        <h2>Call Details</h2>
+        <p class="ref">{{ incident.reference }}</p>
+        <p>
+          <span class="label">Address:</span> {{ incident.address }} ({{ incident.addressState }})
+        </p>
+        <p><span class="label">Call type:</span> unresolved</p>
+        <p class="note">{{ evidenceOnlyNote }}</p>
+        <p class="badge-row">
+          <span class="badge badge-channel">{{ incident.channel }}</span>
+          <span class="badge badge-tgid">TGID {{ incident.tgid }}</span>
+        </p>
+      </section>
+
+      <section class="panel card card-replay" aria-label="Replay evidence">
+        <h2>Replay Evidence</h2>
+        <p><span class="label">ShadowOnly:</span> {{ replay.shadowOnly ? 'true' : 'false' }}</p>
+        <p>
+          <span class="label">PairingIntact:</span> {{ replay.pairingIntact ? 'true' : 'false' }}
+        </p>
+        <p><span class="label">Raw-model fixture:</span> {{ replay.rawModel }}</p>
+        <p><span class="label">Human-reference fixture:</span> {{ replay.humanReference }}</p>
+        <p class="note">{{ replay.difference }}</p>
+      </section>
+
+      <section class="panel card card-ambiguous" aria-label="Ambiguous and rejected evidence">
+        <h2>Ambiguous / Rejected Evidence</h2>
+        @for (item of ambiguousRejected; track item.label) {
+          <p>
+            <strong class="label">{{ item.label }}:</strong>
+            {{ item.detail }}
+          </p>
+        }
+      </section>
+    </aside>
+  </div>
+</div>

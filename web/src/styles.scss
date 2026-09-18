@@ -1,1 +1,414 @@
-/* You can add global styles to this file, and also import other style files */
+html,
+body,
+app-root {
+  height: 100%;
+  margin: 0;
+}
+
+html {
+  background: #0b0f14;
+  color: #e8eef5;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, sans-serif;
+  overflow: hidden;
+}
+
+.shadow-board {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  padding: 0.45rem 0.7rem 0.5rem;
+  gap: 0.35rem;
+  overflow: hidden;
+  font-size: 1rem;
+  line-height: 1.25;
+
+  .alerts {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .alert {
+    margin: 0;
+    padding: 0.32rem 0.6rem;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: 0.045em;
+    text-align: center;
+  }
+
+  .alert-shadow {
+    background: #ffd54a;
+    color: #1a1200;
+  }
+
+  .alert-synthetic {
+    background: #1e2a38;
+    color: #f7fbff;
+    border: 1px solid #9eb0c4;
+  }
+
+  .masthead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  h1,
+  h2 {
+    margin: 0;
+    font-weight: 800;
+  }
+
+  h1 {
+    font-size: 1.45rem;
+    letter-spacing: 0.01em;
+  }
+
+  h2 {
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 0.18rem;
+    color: #d5e2f0;
+  }
+
+  .channels,
+  .badge-row {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.32rem;
+    align-items: center;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.82rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    line-height: 1;
+    padding: 0.22rem 0.42rem;
+    border: 1px solid transparent;
+  }
+
+  .badge-channel {
+    background: #0e1620;
+    color: #f4fbff;
+    border-color: #c9d6e4;
+  }
+
+  .badge-tgid {
+    background: #243140;
+    color: #f4fbff;
+    border-color: #8ea0b4;
+  }
+
+  .badge-evidence {
+    background: #f5d76e;
+    color: #1a1200;
+    border-color: #1a1200;
+    text-transform: uppercase;
+  }
+
+  .pending .badge-channel,
+  .active .badge-channel,
+  .pending .badge-tgid,
+  .active .badge-tgid {
+    background: rgba(10, 14, 20, 0.88);
+    color: #fffef8;
+    border-color: #fff4c2;
+  }
+
+  .layout {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 68% 32%;
+    gap: 0.45rem;
+  }
+
+  .primary,
+  .details {
+    min-height: 0;
+    display: grid;
+    gap: 0.4rem;
+  }
+
+  .primary {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+
+  .details {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .panel {
+    background: #151c26;
+    border: 1px solid #3a4d63;
+    padding: 0.42rem 0.55rem;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .panel p {
+    margin: 0.1rem 0;
+  }
+
+  .note,
+  .unit-flag {
+    color: #d3deea;
+    font-size: 0.86rem;
+  }
+
+  .ref {
+    font-weight: 800;
+    font-size: 1.12rem;
+  }
+
+  .headline {
+    font-size: 1.32rem;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+  }
+
+  .label {
+    display: inline-block;
+    min-width: 8.2rem;
+    color: #b8c7d8;
+    font-weight: 700;
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.08rem;
+    border-left-width: 5px;
+  }
+
+  .card-call {
+    background: #182230;
+    border-color: #c9a227;
+  }
+
+  .card-replay {
+    background: #161e2b;
+    border-color: #6ea8e8;
+  }
+
+  .card-ambiguous {
+    background: #1a2028;
+    border-color: #d67a3a;
+  }
+
+  .pending {
+    background: #d4ab20;
+    color: #161000;
+    border-color: #ffe082;
+    border-left: 6px solid #5a4300;
+  }
+
+  .pending h2,
+  .pending .note,
+  .pending .label {
+    color: #2a1c00;
+  }
+
+  .pending .headline,
+  .pending .ref {
+    color: #120c00;
+  }
+
+  .active {
+    background: #9a1218;
+    color: #fff8f8;
+    border-color: #ff8a80;
+    border-left: 6px solid #ffd54a;
+  }
+
+  .active h2,
+  .active .note {
+    color: #ffe8e8;
+  }
+
+  .active .headline,
+  .active .ref {
+    color: #ffffff;
+    font-size: 1.36rem;
+  }
+
+  .units {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.18rem;
+  }
+
+  .unit {
+    display: grid;
+    grid-template-columns: 3.1rem 4.4rem 17rem minmax(0, 1fr);
+    gap: 0.4rem;
+    align-items: center;
+    padding: 0.16rem 0.4rem;
+    border: 1px solid #102030;
+    font-size: 1.02rem;
+  }
+
+  .unit-id {
+    font-weight: 900;
+    font-size: 1.12rem;
+    letter-spacing: 0.03em;
+  }
+
+  .unit-station {
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+
+  .unit-status {
+    font-weight: 900;
+    letter-spacing: 0.05em;
+  }
+
+  .unit-flag {
+    justify-self: end;
+    text-align: right;
+    font-weight: 700;
+  }
+
+  .unit[data-status='quarters'],
+  .unit[data-status='available'] {
+    background: #0d6a30;
+    color: #ffffff;
+    border-color: #b7f0c8;
+  }
+
+  .unit[data-status='on_air'],
+  .unit[data-status='training'] {
+    background: #0d47a1;
+    color: #ffffff;
+    border-color: #bbdefb;
+  }
+
+  .unit[data-status='enroute_to_quarters'] {
+    background: #ffffff;
+    color: #05080c;
+    border: 2px solid #05080c;
+  }
+
+  .unit[data-status='enroute'] {
+    background: #ef6c00;
+    color: #140800;
+    border-color: #ffe0b2;
+  }
+
+  .unit[data-status='onscene'] {
+    background: #6a1b9a;
+    color: #ffffff;
+    border-color: #e1bee7;
+  }
+
+  .unit[data-status='quarters'] .unit-flag,
+  .unit[data-status='available'] .unit-flag,
+  .unit[data-status='on_air'] .unit-flag,
+  .unit[data-status='training'] .unit-flag,
+  .unit[data-status='onscene'] .unit-flag {
+    color: #ffffff;
+  }
+
+  .unit[data-status='enroute'] .unit-flag,
+  .unit[data-status='enroute_to_quarters'] .unit-flag {
+    color: #140800;
+  }
+
+  .clock {
+    margin-top: 0.28rem;
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+  }
+
+  .oos {
+    border-style: dashed;
+    background: #121820;
+  }
+}
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .shadow-board {
+    overflow: auto;
+    height: auto;
+    font-size: 0.92rem;
+    padding: 0.4rem 0.5rem 0.7rem;
+
+    .alert {
+      font-size: 0.92rem;
+    }
+
+    h1 {
+      font-size: 1.18rem;
+    }
+
+    h2 {
+      font-size: 0.82rem;
+    }
+
+    .headline,
+    .active .headline,
+    .active .ref {
+      font-size: 1.08rem;
+    }
+
+    .masthead {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .layout,
+    .primary,
+    .details {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .layout {
+      grid-template-columns: 1fr;
+    }
+
+    .panel {
+      overflow: visible;
+    }
+
+    .unit {
+      grid-template-columns: 2.6rem 3.4rem minmax(7rem, 1fr);
+      grid-template-rows: auto auto;
+      font-size: 0.92rem;
+    }
+
+    .unit-id {
+      font-size: 1rem;
+    }
+
+    .unit-flag {
+      grid-column: 1 / -1;
+      justify-self: start;
+      text-align: left;
+    }
+
+    .label {
+      min-width: 0;
+      margin-right: 0.35rem;
+    }
+  }
+}
