@@ -1,0 +1,10 @@
+@if (message(); as statusMessage) {
+  <p class="pwa-status" [attr.data-state]="state()" role="status">
+    <span>{{ statusMessage }}</span>
+    @if (state() === 'stale') {
+      <button type="button" [disabled]="activating()" (click)="reloadSyntheticPreview()">
+        Reload synthetic preview
+      </button>
+    }
+  </p>
+}

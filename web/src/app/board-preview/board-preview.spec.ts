@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 
+import { OFFLINE_MESSAGE } from '../pwa-status/pwa-status';
 import { BoardPreview } from './board-preview';
 import { ROSTER, SHADOW_WARNING, SYNTHETIC_WARNING } from './board-preview.fixtures';
 
@@ -31,6 +32,18 @@ describe('BoardPreview', () => {
     const text = el.textContent ?? '';
     expect(text).toContain(SYNTHETIC_WARNING);
     expect(text).toContain('No operational authority');
+    fixture.destroy();
+  });
+
+  it('keeps both warnings visible with the offline synthetic-shell message', () => {
+    const { fixture, el } = render();
+    window.dispatchEvent(new Event('offline'));
+    fixture.detectChanges();
+    const text = el.textContent ?? '';
+    expect(text).toContain(SHADOW_WARNING);
+    expect(text).toContain(SYNTHETIC_WARNING);
+    expect(text).toContain(OFFLINE_MESSAGE);
+    window.dispatchEvent(new Event('online'));
     fixture.destroy();
   });
 

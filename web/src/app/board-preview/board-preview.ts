@@ -1,6 +1,7 @@
 import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, inject, signal } from '@angular/core';
 
+import { PwaStatus } from '../pwa-status/pwa-status';
 import {
   ACTIVE_INCIDENT,
   AMBIGUOUS_REJECTED,
@@ -18,7 +19,7 @@ import {
 
 @Component({
   selector: 'app-board-preview',
-  imports: [DatePipe],
+  imports: [DatePipe, PwaStatus],
   templateUrl: './board-preview.html',
   styleUrl: './board-preview.scss',
 })

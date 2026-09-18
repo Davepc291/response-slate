@@ -1,0 +1,33 @@
+:host {
+  display: contents;
+}
+
+.pwa-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid #ffb74d;
+  background: #3a2104;
+  color: #fff4df;
+  font-size: 0.92rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+button {
+  border: 1px solid #fff4df;
+  background: #fff4df;
+  color: #251400;
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
