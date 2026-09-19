@@ -1,0 +1,105 @@
+:host {
+  display: block;
+  min-height: 100%;
+}
+
+.welcome-screen {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: 32rem;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.welcome-mark {
+  width: 4.5rem;
+  height: 4.5rem;
+  display: grid;
+  grid-template-columns: 0.7rem 0.7rem 1fr;
+  align-items: center;
+  gap: 0.25rem;
+  box-sizing: border-box;
+  padding: 0.8rem;
+  border: 1px solid #6f8aa5;
+  border-radius: 1.1rem;
+  background: #101922;
+}
+
+.welcome-mark span {
+  height: 2.35rem;
+  border-radius: 0.2rem;
+  background: #739cc4;
+}
+
+.welcome-mark strong {
+  color: #ffd54a;
+  font-size: 1.55rem;
+}
+
+.welcome-kicker {
+  margin: 0;
+  color: #acc9e5;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  color: #ffffff;
+  font-size: clamp(1.5rem, 7vw, 2.15rem);
+  line-height: 1.08;
+}
+
+h1:focus {
+  outline: none;
+}
+
+.access-panel {
+  width: 100%;
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.7rem;
+  padding: 1rem;
+  border: 1px solid #50677f;
+  border-radius: 0.75rem;
+  background: #151c26;
+  color: #e7eef5;
+}
+
+.access-panel p {
+  margin: 0;
+}
+
+.prototype-label {
+  color: #ffe38a;
+  font-size: 1.05rem;
+  font-weight: 900;
+}
+
+.access-note {
+  color: #c1cfdd;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+button {
+  min-height: 48px;
+  border: 2px solid #fff0a8;
+  border-radius: 0.45rem;
+  background: #ffd54a;
+  color: #1a1200;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 3px solid #8cc6ff;
+  outline-offset: 3px;
+}

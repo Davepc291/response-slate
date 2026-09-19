@@ -1,0 +1,28 @@
+<section class="units-screen" aria-labelledby="mobile-units-title">
+  <header>
+    <p class="eyebrow">Synthetic roster</p>
+    <h1 id="mobile-units-title" tabindex="-1">Units</h1>
+    <p class="intro">{{ proposedStatusNote }}</p>
+  </header>
+
+  <ol class="unit-list">
+    @for (unit of roster; track unit.id) {
+      <li class="unit-row" [attr.data-status]="unit.statusKind">
+        <span class="unit-id">{{ unit.id }}</span>
+        <span class="unit-station">{{ unit.station }}</span>
+        <span class="unit-status">{{ unit.statusLabel }}</span>
+        @if (unit.proposed) {
+          <span class="unit-qualifier">proposed — not current apparatus state</span>
+        } @else {
+          <span class="unit-qualifier">synthetic display only</span>
+        }
+      </li>
+    }
+  </ol>
+
+  <section class="oos-preview" aria-labelledby="mobile-oos-title">
+    <h2 id="mobile-oos-title">Out of Service</h2>
+    <p>Synthetic out-of-service preview</p>
+    <p>Non-operational fixture. No controls and no CAD authority.</p>
+  </section>
+</section>

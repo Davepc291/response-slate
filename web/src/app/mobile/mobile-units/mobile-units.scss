@@ -1,0 +1,127 @@
+:host {
+  display: block;
+}
+
+.units-screen {
+  display: grid;
+  gap: 0.75rem;
+}
+
+header p,
+h1,
+h2,
+.oos-preview p {
+  margin: 0;
+}
+
+.eyebrow {
+  color: #9fc5ea;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin-top: 0.15rem;
+  color: #ffffff;
+  font-size: 1.8rem;
+}
+
+h1:focus {
+  outline: none;
+}
+
+.intro {
+  margin-top: 0.2rem;
+  color: #c1cfdd;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.unit-list {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.unit-row {
+  display: grid;
+  grid-template-columns: 3rem 4rem minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+  align-items: center;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid #91a6ba;
+  border-left-width: 0.4rem;
+  border-radius: 0.5rem;
+  background: #18222d;
+  color: #ffffff;
+}
+
+.unit-id {
+  font-size: 1.08rem;
+  font-weight: 900;
+}
+
+.unit-station {
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.unit-status {
+  font-size: 0.86rem;
+  font-weight: 900;
+  letter-spacing: 0.035em;
+  text-align: right;
+}
+
+.unit-qualifier {
+  grid-column: 1 / -1;
+  color: #e2eaf2;
+  font-size: 0.76rem;
+}
+
+.unit-row[data-status='quarters'],
+.unit-row[data-status='available'] {
+  border-left-color: #66d18b;
+}
+
+.unit-row[data-status='on_air'],
+.unit-row[data-status='training'] {
+  border-left-color: #70aef5;
+}
+
+.unit-row[data-status='enroute_to_quarters'] {
+  border-left-color: #ffffff;
+}
+
+.unit-row[data-status='enroute'] {
+  border-left-color: #ff9d45;
+}
+
+.unit-row[data-status='onscene'] {
+  border-left-color: #c488ed;
+}
+
+.oos-preview {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.75rem;
+  border: 1px dashed #73879b;
+  border-radius: 0.5rem;
+  background: #111820;
+}
+
+.oos-preview h2 {
+  color: #ffffff;
+  font-size: 0.9rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.oos-preview p {
+  color: #c8d4df;
+  font-size: 0.8rem;
+}

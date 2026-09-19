@@ -1,0 +1,57 @@
+<section class="evidence-screen" aria-labelledby="mobile-evidence-title">
+  <header>
+    <p class="eyebrow">Synthetic replay inspection</p>
+    <h1 id="mobile-evidence-title" tabindex="-1">Evidence</h1>
+    <p class="intro">Evidence is descriptive fixture content, not operational truth.</p>
+  </header>
+
+  <section class="evidence-card channel-card" aria-labelledby="channel-title">
+    <h2 id="channel-title">Channel / TGID</h2>
+    <div class="channel-list" aria-label="Evidence channels">
+      @for (channel of channels; track channel) {
+        <span>{{ channel }}</span>
+      }
+    </div>
+    <p class="evidence-label">evidence labels only</p>
+    <dl>
+      <div>
+        <dt>Fixture channel</dt>
+        <dd>{{ incident.channel }}</dd>
+      </div>
+      <div>
+        <dt>Fixture TGID</dt>
+        <dd>{{ incident.tgid }}</dd>
+      </div>
+    </dl>
+    <p class="warning-note">{{ evidenceOnlyNote }}</p>
+  </section>
+
+  <section class="evidence-card" aria-labelledby="replay-title">
+    <h2 id="replay-title">Replay Evidence</h2>
+    <dl>
+      <div>
+        <dt>ShadowOnly</dt>
+        <dd>{{ replay.shadowOnly ? 'true' : 'false' }}</dd>
+      </div>
+      <div>
+        <dt>PairingIntact</dt>
+        <dd>{{ replay.pairingIntact ? 'true' : 'false' }}</dd>
+      </div>
+    </dl>
+    <p><strong>Raw-model fixture:</strong> {{ replay.rawModel }}</p>
+    <p><strong>Human-reference fixture:</strong> {{ replay.humanReference }}</p>
+    <p class="note">{{ replay.difference }}</p>
+  </section>
+
+  <section class="evidence-card" aria-labelledby="exceptions-title">
+    <h2 id="exceptions-title">Ambiguous / Rejected Evidence</h2>
+    <ul>
+      @for (item of ambiguousRejected; track item.label) {
+        <li>
+          <strong>{{ item.label }}</strong>
+          <span>{{ item.detail }}</span>
+        </li>
+      }
+    </ul>
+  </section>
+</section>

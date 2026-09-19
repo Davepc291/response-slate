@@ -1,0 +1,61 @@
+<section class="calls-screen" aria-labelledby="mobile-calls-title">
+  <header>
+    <p class="eyebrow">Synthetic call details</p>
+    <h1 id="mobile-calls-title" tabindex="-1">Calls</h1>
+    <p class="intro">No call history, live feed, or operational actions.</p>
+  </header>
+
+  <article class="call-card pending-call" aria-labelledby="pending-call-title">
+    <p class="state">Pending — evidence only</p>
+    <h2 id="pending-call-title">{{ pending.reference }}</h2>
+    <dl>
+      <div>
+        <dt>Address</dt>
+        <dd>{{ pending.address }}</dd>
+      </div>
+      <div>
+        <dt>Call type</dt>
+        <dd>{{ pending.callType }}</dd>
+      </div>
+      <div>
+        <dt>Channel</dt>
+        <dd>{{ pending.channel }}</dd>
+      </div>
+      <div>
+        <dt>TGID</dt>
+        <dd>{{ pending.tgid }}</dd>
+      </div>
+    </dl>
+    <p class="note">{{ pending.note }}</p>
+    <p class="evidence-note">{{ evidenceOnlyNote }}</p>
+  </article>
+
+  <article class="call-card active-call" aria-labelledby="active-call-title">
+    <p class="state">Active fixture — evidence only</p>
+    <h2 id="active-call-title">{{ incident.reference }}</h2>
+    <dl>
+      <div>
+        <dt>Address</dt>
+        <dd>{{ incident.address }}</dd>
+      </div>
+      <div>
+        <dt>Address evidence</dt>
+        <dd>{{ incident.addressState }}</dd>
+      </div>
+      <div>
+        <dt>Call type</dt>
+        <dd>{{ incident.callType }} ({{ incident.callTypeState }})</dd>
+      </div>
+      <div>
+        <dt>Channel</dt>
+        <dd>{{ incident.channel }}</dd>
+      </div>
+      <div>
+        <dt>TGID</dt>
+        <dd>{{ incident.tgid }}</dd>
+      </div>
+    </dl>
+    <p class="note">{{ incident.note }}</p>
+    <p class="evidence-note">{{ evidenceOnlyNote }}</p>
+  </article>
+</section>

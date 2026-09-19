@@ -1,0 +1,73 @@
+<div class="mobile-app">
+  <header class="mobile-header">
+    <div class="mobile-identity">
+      <span class="mobile-mode">Mobile synthetic preview</span>
+      <span class="mobile-product">{{ headerTitle }}</span>
+    </div>
+    <div class="mobile-warnings" aria-label="Synthetic preview warnings">
+      <p class="mobile-warning mobile-warning-shadow">{{ shadowWarning }}</p>
+      <p class="mobile-warning mobile-warning-synthetic">{{ syntheticWarning }}</p>
+    </div>
+    <app-pwa-status />
+  </header>
+
+  @if (loading()) {
+    <p class="mobile-loading" role="status">{{ loadingMessage }}</p>
+  }
+
+  <div class="mobile-stage" [class.mobile-stage-welcome]="!showNavigation()">
+    <main class="mobile-main">
+      <router-outlet />
+    </main>
+
+    @if (showNavigation()) {
+      <nav class="mobile-navigation" aria-label="Mobile preview">
+        <a
+          routerLink="/mobile/home"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          <span class="nav-icon" aria-hidden="true">⌂</span>
+          <span>Home</span>
+        </a>
+        <a
+          routerLink="/mobile/calls"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          <span class="nav-icon" aria-hidden="true">≡</span>
+          <span>Calls</span>
+        </a>
+        <a
+          routerLink="/mobile/units"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          <span class="nav-icon" aria-hidden="true">●</span>
+          <span>Units</span>
+        </a>
+        <a
+          routerLink="/mobile/evidence"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          <span class="nav-icon" aria-hidden="true">◇</span>
+          <span>Evidence</span>
+        </a>
+        <a
+          routerLink="/mobile/settings"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          <span class="nav-icon" aria-hidden="true">⚙</span>
+          <span>Settings</span>
+        </a>
+      </nav>
+    }
+  </div>
+</div>

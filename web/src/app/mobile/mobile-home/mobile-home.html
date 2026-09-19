@@ -1,0 +1,57 @@
+<section class="home-screen" aria-labelledby="mobile-home-title">
+  <header class="screen-heading">
+    <p>Mobile overview</p>
+    <h1 id="mobile-home-title" tabindex="-1">Home</h1>
+    <span>Synthetic fixture summaries only</span>
+  </header>
+
+  <article class="summary-card pending-card" aria-labelledby="pending-title">
+    <div class="card-heading">
+      <span class="card-state">Pending</span>
+      <span class="evidence-badge">evidence only</span>
+    </div>
+    <h2 id="pending-title">{{ pending.reference }}</h2>
+    <p class="address">{{ pending.address }}</p>
+    <dl>
+      <div>
+        <dt>Call type</dt>
+        <dd>{{ pending.callType }}</dd>
+      </div>
+      <div>
+        <dt>Channel</dt>
+        <dd>{{ pending.channel }}</dd>
+      </div>
+      <div>
+        <dt>TGID</dt>
+        <dd>{{ pending.tgid }}</dd>
+      </div>
+    </dl>
+    <p class="note">{{ pending.note }}</p>
+  </article>
+
+  <article class="summary-card active-card" aria-labelledby="active-title">
+    <div class="card-heading">
+      <span class="card-state">Active</span>
+      <span class="evidence-badge">evidence only</span>
+    </div>
+    <h2 id="active-title">{{ incident.reference }}</h2>
+    <p class="address">{{ incident.address }}</p>
+    <dl>
+      <div>
+        <dt>Address evidence</dt>
+        <dd>{{ incident.addressState }}</dd>
+      </div>
+      <div>
+        <dt>Call type</dt>
+        <dd>{{ incident.callType }}</dd>
+      </div>
+      <div>
+        <dt>Channel / TGID</dt>
+        <dd>{{ incident.channel }} / {{ incident.tgid }}</dd>
+      </div>
+    </dl>
+    <p class="note">{{ incident.note }}</p>
+  </article>
+
+  <a class="details-link" routerLink="/mobile/calls">View synthetic call details</a>
+</section>
