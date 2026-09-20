@@ -1,5 +1,67 @@
 # Local development database
 
+## Migration 000007: synthetic alert persistence (Step 8C)
+
+Apply once after `000006` to the existing local development PostgreSQL service.
+Migrations 000001-000006 remain unchanged. This migration adds exactly the two
+tables authorized by [the Step 8C task](../docs/alert-notification-engine-v1.md#9-storage-and-retention)
+for the Step 8B synthetic/shadow-only alert-event-v1 model: `detection_audit`
+and `alert_events`. It does not create `tone_configurations`,
+`keyword_configurations`, `notification_deliveries`, or `alert_preferences`;
+those remain gated on a future administration or authentication contract
+(Section 8, 10) and are not authorized here. No incident, unit-status, or
+CAD-write behavior is added.
+
+`detection_audit` is an append-only row per Step 8B detector evaluation
+attempt (`matched`, `ambiguous`, `partial`, `low_confidence`, or `rejected`
+for malformed/duplicate input), referencing the source transmission by the
+existing `audio_fingerprint` or `source_identity` identity primitives via
+foreign key. It records measured tone frequency/duration arrays and keyword
+occurrence counts, bounded and typed, never a free-form metadata blob.
+`alert_events` is an append-only row per published alert, matching the
+Section 5 field table exactly (no transcript, path, credential, raw audio, or
+dataset-identifier column exists), linked back to its originating audit row.
+Both tables reject UPDATE, DELETE, and TRUNCATE through `ENABLE ALWAYS`
+statement triggers, consistent with the existing decision/review audit
+convention. Channel/TGID pairs are constrained to the four confirmed
+Greenwich channels from FR-1; no tone frequency, keyword list, cooldown, or
+confidence threshold is hardcoded anywhere in this migration.
+
+`record_alert_detection(...)` is the sole write path: one `detection_audit`
+row is always inserted, and at most one `alert_events` row per `dedup_key` per
+caller-supplied cooldown window (an explicit, required argument; this
+migration assumes no default). A per-`dedup_key` advisory lock serializes
+concurrent detections of the same evidence/detector/configuration so the
+cooldown check and insert are never racy. Retrying an already-recorded
+`event_id` is a no-op (idempotent), and every suppressed duplicate still
+writes its own audit row, per Section 6. Both the audit insert and the
+event insert happen inside one function call, so a failure partway through
+(for example, a malformed `display_summary`) rolls back the entire call,
+never leaving a partial write behind.
+
+Apply and test against the running local `greenwich-fire-responder-postgres-1`
+service:
+
+```powershell
+Get-Content -Raw database/migrations/000007_alert_persistence.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000007 failed.' }
+Get-Content -Raw database/tests/000007_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Alert persistence schema tests failed.' }
+```
+
+Check `schema_migrations` before applying: rerunning this migration fails and
+rolls back; the API and CLI never auto-migrate, and this repository has no
+separate down-migration file for any existing version — reverting a migration
+means writing and applying a new, explicitly reviewed superseding migration,
+never editing history in place. The new `backend/internal/alertstore`
+(persistence) and `backend/internal/alertpipeline` (Step 8B detector wiring)
+packages are never registered by the live server (`backend/cmd/api`); they
+are dormant until a test or a future authorized integration constructs and
+calls them explicitly. Run existing SQL suites 000001-000006 as well when
+initially applying this schema. All fixtures are synthetic and roll back.
+
 ## Migration 000006: append-only transcript review
 
 Apply once after `000005` to the existing local development PostgreSQL service.
