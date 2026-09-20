@@ -1,7 +1,7 @@
 # Mobile Phone Experience Contract v1 — Step 7C
 
-Status: Design contract only. No Step 7C application implementation is
-authorized by this document.
+Status: Step 7C design contract, implemented by Step 7D. Step 7E amends only
+the installed-PWA launch route and related manifest identity.
 
 Contract identifier: `mobile-phone-experience-v1`.
 
@@ -36,15 +36,15 @@ No existing application API conflicts with this design because no application
 API is proposed.
 
 The [mobile/PWA beta contract](mobile-pwa-beta-v1.md) requires the root route
-to render the current board and the manifest `start_url` to remain `/`. Step 7C
-therefore defines explicit `/mobile/...` routes and forbids automatic
-viewport, user-agent, or standalone-mode redirects away from `/`.
+to render the current board. Step 7C therefore defines explicit
+`/mobile/...` routes and forbids automatic viewport, user-agent, or
+standalone-mode redirects away from `/`.
 
-Under the current manifest, a newly installed PWA opens `/` and therefore the
-existing board. A tester may navigate within the standalone app to
-`/mobile/welcome`, because the manifest scope is `/`. Making the dedicated
-phone experience the installed launch default would require a separately
-approved amendment to the PWA contract and manifest; it is not approved here.
+Step 7E amends the installed-PWA launch behavior only. The manifest uses
+`start_url: "/mobile/welcome"`, `id: "/mobile/"`, and `scope: "/"`, so a newly
+installed PWA opens the dedicated prototype welcome screen. Normal website
+navigation to `/` still opens the unchanged desktop board. This launch choice
+does not redirect any route based on viewport, user agent, or display mode.
 
 If a later implementation discovers that Angular routing, the current service
 worker, or another approved contract cannot preserve these boundaries, work
@@ -297,9 +297,10 @@ scroll regions for ordinary content.
 
 ## Install and standalone behavior
 
-The existing manifest name, `GFR V3 SHADOW` short name, icon set, scope,
-display mode, colors, orientation, and `start_url: "/"` remain unchanged.
-Step 7C adds no install prompt and no manifest changes.
+The existing manifest name, `GFR V3 SHADOW` short name, icon set, display
+mode, colors, and orientation remain unchanged. Step 7E sets
+`start_url: "/mobile/welcome"`, `id: "/mobile/"`, and `scope: "/"`. It adds no
+install prompt and does not change the normal website root route.
 
 When `/mobile/...` is opened inside the installed standalone PWA:
 
@@ -417,7 +418,8 @@ reuses the existing `PwaStatus`. Navigation may be implemented inside
 surface.
 
 The following remain unchanged unless a later contract explicitly says
-otherwise:
+otherwise. Step 7E is the narrow exception for the three approved manifest
+launch fields described above:
 
 ```text
 web/src/app/board-preview/**
@@ -437,36 +439,36 @@ backend endpoint is proposed.
 
 ## Acceptance-test matrix
 
-| ID     | Case                     | Required pass condition                                                                                                                  | Verification                                                                      |
-| ------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| MPX-01 | Desktop root             | `/` still renders the existing `BoardPreview` at all widths                                                                              | Automated route/component test                                                    |
-| MPX-02 | Desktop layout           | Existing 68% / 32% desktop grid, responsive fallback, fixture meaning, and board tests are unchanged                                     | Diff inspection plus existing tests; desktop visual check                         |
-| MPX-03 | Dedicated visual design  | `/mobile/...` uses the mobile shell, single active screen, and bottom navigation rather than the desktop board grid                      | Component test plus phone screenshots                                             |
-| MPX-04 | Warning one              | Exact `SHADOW / REPLAY — NOT LIVE CAD` is visible on every mobile route and state                                                        | Parameterized component tests; device check                                       |
-| MPX-05 | Warning two              | Exact `Synthetic replay preview. No operational authority.` is visible on every mobile route and state                                   | Parameterized component tests; device check                                       |
-| MPX-06 | Welcome copy             | Welcome shows product identity, `Prototype access — not authentication.`, and `No credentials are collected or verified.`                | Component test                                                                    |
-| MPX-07 | No credential collection | Welcome contains no form or credential/PIN/passkey/OTP inputs and writes no browser storage                                              | DOM test, source scan, storage spy                                                |
-| MPX-08 | Entry behavior           | `Enter synthetic preview` only navigates to `/mobile/home`; it creates no session or access decision                                     | Router test and storage/network spies                                             |
-| MPX-09 | Route openness           | Direct mobile URLs work without guards; tests state this is not authorization                                                            | Router test                                                                       |
-| MPX-10 | Navigation               | Home, Calls, Units, Evidence, Settings appear in order with labels, 44×44 targets, and `aria-current`                                    | Component/a11y test; device check                                                 |
-| MPX-11 | Home                     | Compact Pending and Active cards show only existing synthetic fixtures and evidence labels                                               | Component test                                                                    |
-| MPX-12 | Calls                    | Calls shows synthetic pending/active detail, unresolved call type, and no history/actions/real data                                      | Component test and source scan                                                    |
-| MPX-13 | Units                    | Unit order is exactly `DC`, `E2`, `E3`, `E4`, `E5`, `SQ1`, `SQ8`, `T1` with text statuses                                                | Component test                                                                    |
-| MPX-14 | Evidence                 | All four channel labels and Channel/TGID evidence-only warning are visible; replay caveats remain intact                                 | Component test                                                                    |
-| MPX-15 | Settings connection      | Connection state is based only on `navigator.onLine` and is labeled as a browser hint, not CAD/server state                              | Unit test and source scan                                                         |
-| MPX-16 | Settings build           | Static build/version fields render without a version endpoint or secrets                                                                 | Unit test, source scan, production-build inspection                               |
-| MPX-17 | Prototype logout         | `Log out of prototype` navigates only to welcome, clears nothing, and does not prevent Back/direct navigation                            | Router and storage tests                                                          |
-| MPX-18 | Breakpoints              | 320–767 widths are phone-first; 768+ mobile routes are centered; `/` retains its independent desktop behavior                            | Responsive visual tests at 320, 375, 390, 412, 480, 768, 900, and 1440 CSS pixels |
-| MPX-19 | Safe areas               | Header, content, and bottom navigation honor all four safe-area insets in portrait and landscape                                         | CSS inspection and physical-device check                                          |
-| MPX-20 | Standalone               | Mobile routes stay within manifest scope, keep warnings, and remain usable without browser chrome                                        | Android Chrome and iPhone Safari installed-PWA checks                             |
-| MPX-21 | Loading                  | Any delayed route render shows `Loading synthetic mobile preview. NOT LIVE CAD.` and no live-data implication                            | Component test                                                                    |
-| MPX-22 | Offline                  | Cached shell shows exact offline copy, both warnings, and only synthetic fixtures                                                        | Unit/integration test plus installed-device offline check                         |
-| MPX-23 | Unavailable              | Unavailable state shows exact approved copy and no empty operational-looking screen                                                      | Unit/integration test plus cold-offline check where platform permits              |
-| MPX-24 | Stale update             | Exact stale copy appears; no activation/reload occurs before explicit button selection                                                   | `SwUpdate` unit test and HTTPS preview update check                               |
-| MPX-25 | Accessibility            | Landmarks, headings, focus order, live regions, contrast, text zoom, reduced motion, and screen-reader labels meet this contract         | Automated a11y checks plus keyboard, VoiceOver, and TalkBack review               |
-| MPX-26 | No integrations          | No `HttpClient`, `fetch`, WebSocket, API URL, notifications, auth library, credential store, database, audio, telemetry, or private data | Dependency/source/cache/secret scans                                              |
-| MPX-27 | Shell-only cache         | Existing application-shell asset group remains; no `dataGroups` or external URLs are added                                               | Source and generated `ngsw.json` inspection                                       |
-| MPX-28 | Scope                    | Implementation diff, if later authorized, stays within the exact proposed web surface and does not edit contracts or deployment config   | Git diff and status inspection                                                    |
+| ID     | Case                     | Required pass condition                                                                                                                     | Verification                                                                      |
+| ------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| MPX-01 | Desktop root             | `/` still renders the existing `BoardPreview` at all widths                                                                                 | Automated route/component test                                                    |
+| MPX-02 | Desktop layout           | Existing 68% / 32% desktop grid, responsive fallback, fixture meaning, and board tests are unchanged                                        | Diff inspection plus existing tests; desktop visual check                         |
+| MPX-03 | Dedicated visual design  | `/mobile/...` uses the mobile shell, single active screen, and bottom navigation rather than the desktop board grid                         | Component test plus phone screenshots                                             |
+| MPX-04 | Warning one              | Exact `SHADOW / REPLAY — NOT LIVE CAD` is visible on every mobile route and state                                                           | Parameterized component tests; device check                                       |
+| MPX-05 | Warning two              | Exact `Synthetic replay preview. No operational authority.` is visible on every mobile route and state                                      | Parameterized component tests; device check                                       |
+| MPX-06 | Welcome copy             | Welcome shows product identity, `Prototype access — not authentication.`, and `No credentials are collected or verified.`                   | Component test                                                                    |
+| MPX-07 | No credential collection | Welcome contains no form or credential/PIN/passkey/OTP inputs and writes no browser storage                                                 | DOM test, source scan, storage spy                                                |
+| MPX-08 | Entry behavior           | `Enter synthetic preview` only navigates to `/mobile/home`; it creates no session or access decision                                        | Router test and storage/network spies                                             |
+| MPX-09 | Route openness           | Direct mobile URLs work without guards; tests state this is not authorization                                                               | Router test                                                                       |
+| MPX-10 | Navigation               | Home, Calls, Units, Evidence, Settings appear in order with labels, 44×44 targets, and `aria-current`                                       | Component/a11y test; device check                                                 |
+| MPX-11 | Home                     | Compact Pending and Active cards show only existing synthetic fixtures and evidence labels                                                  | Component test                                                                    |
+| MPX-12 | Calls                    | Calls shows synthetic pending/active detail, unresolved call type, and no history/actions/real data                                         | Component test and source scan                                                    |
+| MPX-13 | Units                    | Unit order is exactly `DC`, `E2`, `E3`, `E4`, `E5`, `SQ1`, `SQ8`, `T1` with text statuses                                                   | Component test                                                                    |
+| MPX-14 | Evidence                 | All four channel labels and Channel/TGID evidence-only warning are visible; replay caveats remain intact                                    | Component test                                                                    |
+| MPX-15 | Settings connection      | Connection state is based only on `navigator.onLine` and is labeled as a browser hint, not CAD/server state                                 | Unit test and source scan                                                         |
+| MPX-16 | Settings build           | Static build/version fields render without a version endpoint or secrets                                                                    | Unit test, source scan, production-build inspection                               |
+| MPX-17 | Prototype logout         | `Log out of prototype` navigates only to welcome, clears nothing, and does not prevent Back/direct navigation                               | Router and storage tests                                                          |
+| MPX-18 | Breakpoints              | 320–767 widths are phone-first; 768+ mobile routes are centered; `/` retains its independent desktop behavior                               | Responsive visual tests at 320, 375, 390, 412, 480, 768, 900, and 1440 CSS pixels |
+| MPX-19 | Safe areas               | Header, content, and bottom navigation honor all four safe-area insets in portrait and landscape                                            | CSS inspection and physical-device check                                          |
+| MPX-20 | Standalone               | Installed launch opens `/mobile/welcome`; mobile routes stay within manifest scope, keep warnings, and remain usable without browser chrome | Manifest test plus Android Chrome and iPhone Safari installed-PWA checks          |
+| MPX-21 | Loading                  | Any delayed route render shows `Loading synthetic mobile preview. NOT LIVE CAD.` and no live-data implication                               | Component test                                                                    |
+| MPX-22 | Offline                  | Cached shell shows exact offline copy, both warnings, and only synthetic fixtures                                                           | Unit/integration test plus installed-device offline check                         |
+| MPX-23 | Unavailable              | Unavailable state shows exact approved copy and no empty operational-looking screen                                                         | Unit/integration test plus cold-offline check where platform permits              |
+| MPX-24 | Stale update             | Exact stale copy appears; no activation/reload occurs before explicit button selection                                                      | `SwUpdate` unit test and HTTPS preview update check                               |
+| MPX-25 | Accessibility            | Landmarks, headings, focus order, live regions, contrast, text zoom, reduced motion, and screen-reader labels meet this contract            | Automated a11y checks plus keyboard, VoiceOver, and TalkBack review               |
+| MPX-26 | No integrations          | No `HttpClient`, `fetch`, WebSocket, API URL, notifications, auth library, credential store, database, audio, telemetry, or private data    | Dependency/source/cache/secret scans                                              |
+| MPX-27 | Shell-only cache         | Existing application-shell asset group remains; no `dataGroups` or external URLs are added                                                  | Source and generated `ngsw.json` inspection                                       |
+| MPX-28 | Scope                    | Implementation stays within the approved web surface; Step 7E changes only this contract, manifest launch fields, and focused tests         | Git diff and status inspection                                                    |
 
 Physical iPhone Safari and Android Chrome checks are mandatory for MPX-10,
 MPX-18 through MPX-20, and the device portions of MPX-22 through MPX-25. They
@@ -502,22 +504,19 @@ cannot be replaced by desktop emulation alone.
 These questions do not block this documentation milestone, but they must be
 resolved before any affected implementation behavior is approved:
 
-1. Should a future PWA-contract amendment change the installed launch from
-   `/` to `/mobile/welcome`, or should the installed app continue opening the
-   desktop board with a separate explicit mobile entry? Step 7C preserves `/`.
-2. How should users discover `/mobile/welcome` without adding a link to the
-   existing desktop board? No board change is approved here.
-3. What compile-time version format should Settings show: package version,
+1. How should website users discover `/mobile/welcome` without adding a link
+   to the existing desktop board? No board change is approved here.
+2. What compile-time version format should Settings show: package version,
    short commit identifier, build date, or a reviewed combination? It must not
    require a runtime endpoint.
-4. Should widths from 768px through 899px use the phone shell or a future
+3. Should widths from 768px through 899px use the phone shell or a future
    tablet design? This contract centers the phone shell until a tablet
    contract exists.
-5. Should the navigation-only action continue to be labeled `Log out of
+4. Should the navigation-only action continue to be labeled `Log out of
 prototype`, or should implementation use the less auth-like `Exit
 prototype`? The acceptance copy currently requires the former plus an
    explicit no-session explanation.
-6. Which identity provider, account lifecycle, roles, server-side
+5. Which identity provider, account lifecycle, roles, server-side
    authorization policy, revocation model, and audit requirements would apply
    to a future real authentication contract? None is selected or implied.
 
@@ -526,7 +525,7 @@ prototype`? The acceptance copy currently requires the former plus an
 - [ ] Only this documentation file is added.
 - [ ] Baseline, clean-tree, and `origin/main` equality are recorded.
 - [ ] Existing PWA and board contracts are not edited.
-- [ ] Root/manifest constraints and the explicit mobile-route consequence are
+- [ ] The unchanged website root and Step 7E installed launch behavior are
       documented.
 - [ ] Desktop layout and route are preserved.
 - [ ] Both warnings are exact and mandatory on every phone screen/state.

@@ -19,6 +19,20 @@ describe('mobile routes', () => {
     expect(routes[1]?.path).toBe('mobile');
   });
 
+  it('loads the existing BoardPreview at /', async () => {
+    TestBed.configureTestingModule({ imports: [App], providers: [provideRouter(routes)] });
+    const fixture = TestBed.createComponent(App);
+    const router = TestBed.inject(Router);
+
+    await router.navigateByUrl('/');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('app-board-preview .shadow-board')).not.toBeNull();
+    fixture.destroy();
+  });
+
   it('defines only the approved open mobile child routes', () => {
     const shellRoute = mobileRoutes[0];
     expect(shellRoute.component).toBe(MobileShell);
@@ -72,6 +86,10 @@ describe('mobile routes', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const el = fixture.nativeElement as HTMLElement;
+    const labels = Array.from(
+      el.querySelectorAll<HTMLElement>('.mobile-navigation a span:last-child'),
+    ).map((label) => label.textContent?.trim());
+    expect(labels).toEqual(['Home', 'Calls', 'Units', 'Evidence', 'Settings']);
     const current = el.querySelector('.mobile-navigation [aria-current="page"]');
     expect(current?.textContent?.trim()).toBe('⌂Home');
     expect(el.querySelector('.mobile-main h1')?.textContent).toContain('Home');
