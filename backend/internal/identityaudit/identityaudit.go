@@ -147,7 +147,7 @@ func ValidateMetadata(t EventType, m Metadata) error {
 // Event must never be persisted directly.
 type Event struct {
 	Type      EventType
-	AccountID identity.UserID // 0 means "no account" (only valid for an unmatched login_failure)
+	AccountID identity.UserID // 0 means "no account" (only valid for an unmatched login_failure or invitation_redemption_failed)
 	ActorID   identity.UserID // 0 means "no distinct actor" (a user's own action)
 	Reason    string          // optional; "" means no reason code recorded
 	Metadata  Metadata
@@ -157,13 +157,19 @@ type Event struct {
 // New validates and constructs an Event. accountID and/or actorID may be 0
 // (identity.UserID's zero value) when not applicable, except that a nil
 // account is permitted only for LoginFailure (Section 10: "attempted
-// email...not proof an account exists"); every other event type requires a
+// email...not proof an account exists") and, added narrowly by Step 9C,
+// InvitationRedemptionFailed: an unknown, already-redeemed, or expired
+// invitation token must be exactly as enumeration-resistant as an unknown
+// login (Section 2: "any other status returns the same generic failure
+// used for an unknown token, per account-enumeration resistance"), and
+// identitystore.RedeemInvitation's own expired/invalid paths do not resolve
+// an account id to report here. Every other event type still requires a
 // resolvable account.
 func New(t EventType, accountID, actorID identity.UserID, reason string, metadata Metadata, now time.Time) (Event, error) {
 	if _, ok := allowedKeys[t]; !ok {
 		return Event{}, ErrUnknownEventType
 	}
-	if accountID == 0 && t != LoginFailure {
+	if accountID == 0 && t != LoginFailure && t != InvitationRedemptionFailed {
 		return Event{}, ErrMissingAccountOrActor
 	}
 	if reason != "" && !reasonPattern.MatchString(reason) {

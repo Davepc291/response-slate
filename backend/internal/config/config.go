@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"greenwich-fire-responder/backend/internal/audioanalysis"
+	"greenwich-fire-responder/backend/internal/authconfig"
 	"greenwich-fire-responder/backend/internal/operations"
 	"greenwich-fire-responder/backend/internal/recordings"
 	"greenwich-fire-responder/backend/internal/transcription"
@@ -22,6 +23,10 @@ type Config struct {
 	Audio            audioanalysis.Options
 	Transcription    transcription.Options
 	Operations       operations.Options
+	// Auth is the Step 9C authentication configuration. Its zero value has
+	// Enabled == false, so an existing deployment that sets none of the
+	// GFR_AUTH_* variables is completely unaffected.
+	Auth authconfig.Options
 }
 
 // Load does not read .env files. Errors never contain environment values.
@@ -105,6 +110,12 @@ func Load() (Config, error) {
 	}
 	if err := loadOperations(&cfg.Operations); err != nil {
 		return Config{}, err
+	}
+	if err := loadAuth(&cfg.Auth); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.Enabled && cfg.DatabaseURL == "" {
+		return Config{}, errors.New("GFR_DATABASE_URL is required when GFR_AUTH_ENABLED is true")
 	}
 	return cfg, nil
 }

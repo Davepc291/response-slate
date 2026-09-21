@@ -22,6 +22,20 @@ func TestNewRequiresAccountExceptLoginFailure(t *testing.T) {
 	}
 }
 
+// Step 9C narrowly extends the same no-account allowance to
+// InvitationRedemptionFailed: identitystore.RedeemInvitation's expired and
+// invalid-token paths do not resolve an account id, and Section 2 requires
+// this failure to be exactly as enumeration-resistant as an unknown login.
+// Every other event type must still require an account.
+func TestNewAllowsNoAccountForInvitationRedemptionFailed(t *testing.T) {
+	if _, err := New(InvitationRedemptionFailed, 0, 0, "", Metadata{"reason_code": "token_expired"}, now); err != nil {
+		t.Fatalf("expected invitation_redemption_failed with no account to be constructible, got %v", err)
+	}
+	if _, err := New(AccountStateChange, 0, 1, "", Metadata{"prior_status": "active", "new_status": "suspended"}, now); err != ErrMissingAccountOrActor {
+		t.Fatalf("expected account_state_change to still require an account, got %v", err)
+	}
+}
+
 func TestValidateMetadataAllowList(t *testing.T) {
 	if err := ValidateMetadata(InvitationCreated, Metadata{"role": "dispatcher_operator"}); err != nil {
 		t.Errorf("expected allow-listed key to pass: %v", err)

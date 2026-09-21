@@ -109,7 +109,7 @@ func (p *Postgres) Record(ctx context.Context, ev identityaudit.Event) (int64, e
 	if err := identityaudit.ValidateMetadata(ev.Type, ev.Metadata); err != nil {
 		return 0, ErrInput
 	}
-	if ev.AccountID == 0 && ev.Type != identityaudit.LoginFailure {
+	if ev.AccountID == 0 && ev.Type != identityaudit.LoginFailure && ev.Type != identityaudit.InvitationRedemptionFailed {
 		return 0, ErrInput
 	}
 	if ev.CreatedAt.IsZero() {

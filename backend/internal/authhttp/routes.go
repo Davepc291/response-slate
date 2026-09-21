@@ -1,0 +1,51 @@
+package authhttp
+
+import "net/http"
+
+// Mux builds the authentication API's routes. Every pattern is registered
+// with an explicit HTTP method, so Go's net/http ServeMux itself enforces
+// strict method matching (a request to a registered path with the wrong
+// method receives an automatic 405 with an Allow header, never silently
+// falling through to a handler that assumed one method).
+//
+// Route surface deviations from docs/authentication-authorization-v1.md
+// Section 11.3's illustrative proposed table:
+//
+//  1. GET /api/auth/me is added. Section 11.3's table has no "current
+//     session" route at all, but this task's requirement 2 explicitly
+//     requires a "current authenticated user/session" operation. This is
+//     the narrowest addition that satisfies it without inventing anything
+//     else Section 11.3 does not already describe elsewhere (an
+//     authenticated identity/role/status lookup).
+//  2. Section 11.3's table shows the invitation and password-reset tokens
+//     as URL path segments (/api/auth/first-time-login/{token} and
+//     /api/auth/password-reset/{token}). The contract's own general rule
+//     ("Do not put credentials or tokens in URLs or query strings")
+//     controls over that illustrative table, so both routes instead take
+//     the token only inside the bounded JSON request body:
+//     POST /api/auth/first-time-login (body: {token, password}) and
+//     POST /api/auth/password-reset/complete (body: {token, password}).
+//     Neither token ever appears in a URL, so it cannot reach browser
+//     history or an intermediate proxy's access log through the request
+//     line; this package's handlers also never log a request path, body,
+//     or token value.
+//
+// Administrator user-management routes (/api/admin/*) and MFA enrollment
+// are out of Step 9C's scope entirely (no administrator Users screen, no
+// MFA enrollment) and are not registered here.
+func (h *Handlers) Mux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /api/auth/login", h.handleLogin)
+	mux.HandleFunc("POST /api/auth/first-time-login", h.handleFirstTimeLogin)
+	mux.HandleFunc("POST /api/auth/password-reset", h.handlePasswordResetRequest)
+	mux.HandleFunc("POST /api/auth/password-reset/complete", h.handlePasswordResetComplete)
+
+	mux.HandleFunc("GET /api/auth/me", h.requireSession(h.handleMe))
+	mux.HandleFunc("POST /api/auth/logout", h.requireSession(h.requireCSRF(h.handleLogout)))
+	mux.HandleFunc("POST /api/auth/logout-all", h.requireSession(h.requireCSRF(h.handleLogoutAll)))
+	mux.HandleFunc("GET /api/auth/sessions", h.requireSession(h.handleListSessions))
+	mux.HandleFunc("DELETE /api/auth/sessions/{id}", h.requireSession(h.requireCSRF(h.handleRevokeSession)))
+
+	return mux
+}

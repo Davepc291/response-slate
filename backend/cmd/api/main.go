@@ -87,9 +87,26 @@ func runWithConfig(ctx context.Context, cfg config.Config, transport http.RoundT
 		<-ingestionDone
 	}()
 
+	authHandlers, closeAuth, err := buildAuthHandlers(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer closeAuth()
+
+	handler := httpapi.NewHandler(db, monitor)
+	if authHandlers != nil {
+		root := http.NewServeMux()
+		root.Handle("/api/auth/", authHandlers.Mux())
+		root.Handle("/", handler)
+		handler = root
+		logger.Info("authentication", "outcome", "enabled")
+	} else {
+		logger.Info("authentication", "outcome", "disabled")
+	}
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db, monitor),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

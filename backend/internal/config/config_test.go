@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -46,7 +47,7 @@ func TestLoad(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatal("configuration does not match expected values")
 			}
 		})
@@ -80,6 +81,12 @@ func clearRecordingEnv(t *testing.T) {
 	for _, name := range []string{"GFR_RECORDINGS_DIR", "GFR_RECORDING_TIMEZONE", "GFR_RECORDING_POLL_INTERVAL",
 		"GFR_RECORDING_STABLE_FOR", "GFR_RECORDING_MAX_WAIT", "GFR_RECORDING_RETRY_INTERVAL", "GFR_RECORDING_MAX_ATTEMPTS",
 		"GFR_FFPROBE_PATH", "GFR_FFMPEG_PATH", "GFR_AUDIO_TIMEOUT", "GFR_AUDIO_MAX_DURATION", "GFR_AUDIO_MAX_ATTEMPTS", "GFR_AUDIO_RETRY_INTERVAL"} {
+		t.Setenv(name, "")
+	}
+	for _, name := range []string{"GFR_AUTH_ENABLED", "GFR_AUTH_SESSION_IDLE_TIMEOUT", "GFR_AUTH_SESSION_MAX_LIFETIME",
+		"GFR_AUTH_PASSWORD_RESET_TTL", "GFR_AUTH_SESSION_SECRET", "GFR_AUTH_ALLOWED_ORIGINS", "GFR_AUTH_TRUSTED_PROXIES",
+		"GFR_AUTH_RATE_LIMIT_PER_ACCOUNT", "GFR_AUTH_RATE_LIMIT_PER_IP", "GFR_AUTH_RATE_LIMIT_INVITATION",
+		"GFR_AUTH_RATE_LIMIT_PASSWORD_RESET", "GFR_AUTH_RATE_LIMIT_PASSWORD_RESET_COMPLETE", "GFR_AUTH_BREACH_CHECK_ENABLED"} {
 		t.Setenv(name, "")
 	}
 }
