@@ -97,6 +97,13 @@ func runWithConfig(ctx context.Context, cfg config.Config, transport http.RoundT
 	if authHandlers != nil {
 		root := http.NewServeMux()
 		root.Handle("/api/auth/", authHandlers.Mux())
+		// Step 9E's administrator routes (/api/admin/users*) are registered
+		// on the identical Handlers.Mux() alongside /api/auth/*, so that mux
+		// must also be reachable under the /api/admin/ subtree — otherwise
+		// every /api/admin/... request falls through to the "/" handler
+		// below, which has no such route and answers with net/http's
+		// router-level plain-text 404 instead of ever reaching admin auth.
+		root.Handle("/api/admin/", authHandlers.Mux())
 		root.Handle("/", handler)
 		handler = root
 		logger.Info("authentication", "outcome", "enabled")
