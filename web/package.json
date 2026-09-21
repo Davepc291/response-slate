@@ -6,7 +6,8 @@
     "start": "ng serve",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "node --test tests/manifest.test.mjs && ng test"
+    "local-auth": "ng serve --ssl --proxy-config proxy.conf.json",
+    "test": "node --test tests/manifest.test.mjs tests/proxy.test.mjs && ng test"
   },
   "private": true,
   "packageManager": "npm@11.17.0",

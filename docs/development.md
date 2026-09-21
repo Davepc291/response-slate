@@ -435,3 +435,256 @@ It is not part of the API or production worker. Follow the explicit split,
 private output, and credential workflow in
 [transcription experiments](transcription-experiments.md). Do not run a live
 experiment as part of installation or ordinary tests.
+
+## Step 9F: local authentication end-to-end testing
+
+This section documents the **local-only** procedure for exercising the Step
+9C/9D/9E authentication and administration surface end to end: sign-in,
+first-time password establishment, sessions, admin user management,
+suspension, role restrictions, logout, and audit records. Nothing here
+changes production configuration, authorization rules, or deployment
+behavior. See
+[docs/authentication-authorization-v1.md](authentication-authorization-v1.md)
+for the approved contract these screens and endpoints implement.
+
+### 1. Prerequisite checks
+
+Confirm Docker and the local PostgreSQL service are healthy before doing
+anything else (see [Configure](#configure) and
+[Status and logs](#status-and-logs) above if `.env` does not exist yet or the
+service is not running):
+
+```powershell
+docker context show
+docker compose --env-file .env ps postgres
+```
+
+Wait for `postgres` to report `healthy`. Do not proceed against a database
+you do not recognize as your own local instance.
+
+### 2. Apply migration 000008 and verify its schema
+
+Apply migrations `000001`-`000007` first if not already applied (see
+[database/README.md](../database/README.md)), then apply `000008` and its
+schema test:
+
+```powershell
+Get-Content -Raw database/migrations/000008_identity_foundation.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000008 failed.' }
+Get-Content -Raw database/tests/000008_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Identity schema tests failed.' }
+```
+
+Confirm the version is recorded and `users` is empty (a prerequisite for
+`bootstrap-admin` below):
+
+```powershell
+docker compose --env-file .env exec postgres psql -U gfr_dev -d greenwich_fire_responder_dev -c "SELECT version FROM schema_migrations ORDER BY version;"
+docker compose --env-file .env exec postgres psql -U gfr_dev -d greenwich_fire_responder_dev -c "SELECT count(*) FROM users;"
+```
+
+### 3. Required `GFR_AUTH_*` environment variables
+
+Set these in the process environment before starting the API (never in
+`.env`: the API does not load it automatically). `GFR_AUTH_ENABLED=true`
+independently requires `GFR_DATABASE_URL` to be set, regardless of
+`GFR_DATABASE_REQUIRED`.
+
+```powershell
+$env:GFR_DATABASE_URL = 'postgres://gfr_dev:<your local password>@127.0.0.1:5432/greenwich_fire_responder_dev?sslmode=disable'
+$env:GFR_DATABASE_REQUIRED = 'true'
+$env:GFR_AUTH_ENABLED = 'true'
+$env:GFR_AUTH_SESSION_IDLE_TIMEOUT = '15m'
+$env:GFR_AUTH_SESSION_MAX_LIFETIME = '12h'
+$env:GFR_AUTH_PASSWORD_RESET_TTL = '1h'
+# Local testing only: the approved contract leaves this duration an
+# unresolved production decision (Section 15, item 6/7). 1 hour is short
+# enough that a stale local invitation does not linger, and must never be
+# treated as a production default.
+$env:GFR_AUTH_INVITATION_TTL = '1h'
+$env:GFR_AUTH_ALLOWED_ORIGINS = 'https://localhost:4200'
+$env:GFR_AUTH_RATE_LIMIT_PER_ACCOUNT = '5/15m'
+$env:GFR_AUTH_RATE_LIMIT_PER_IP = '20/15m'
+$env:GFR_AUTH_RATE_LIMIT_INVITATION = '10/1h'
+$env:GFR_AUTH_RATE_LIMIT_PASSWORD_RESET = '5/1h'
+$env:GFR_AUTH_BREACH_CHECK_ENABLED = 'false'
+```
+
+`GFR_AUTH_ALLOWED_ORIGINS` must exactly match the origin the browser actually
+shows for the Angular app — `https://localhost:4200`, the origin
+`npm run local-auth` (below) serves. This is an allowlist for the CSRF
+origin check, not a CORS relaxation; it does not, by itself, allow a
+cross-origin request to succeed.
+
+Generate `GFR_AUTH_SESSION_SECRET` fresh for each local database you
+bootstrap; it never has a default and must never be committed:
+
+```powershell
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:GFR_AUTH_SESSION_SECRET = [Convert]::ToBase64String($bytes)
+$bytes = $null
+```
+
+(Equivalently, on a machine with OpenSSL available: `openssl rand -base64 32`.)
+Never `Write-Output`, log, or paste this value anywhere outside setting the
+environment variable itself.
+
+### 4. Bootstrap the first administrator
+
+`backend/cmd/bootstrap-admin` is a standalone, local-only CLI. It is never
+built into, imported by, or reachable from the live API (`backend/cmd/api`);
+it adds no HTTP endpoint and changes no authorization rule. It exists only
+because migration 000008 intentionally inserts zero rows and every
+`/api/admin/users*` route requires an already-authenticated administrator —
+there is otherwise no way to reach the first one.
+
+It refuses to run against any database host other than `127.0.0.1`,
+`localhost`, or `::1`; refuses to run unless the `users` table is completely
+empty; requires the explicit `-confirm` flag; and always collects the new
+password interactively with hidden terminal input, confirmed a second time.
+It never accepts a password as a command-line argument, and never prints or
+logs a password, password hash, token, or database credential.
+
+```powershell
+Set-Location backend
+go run ./cmd/bootstrap-admin -email "admin@example.test" -display-name "Local Test Admin" -confirm
+Set-Location ..
+```
+
+You will be prompted twice, with no characters echoed to the terminal.
+Choose any password meeting the length policy (12-256 characters; no
+composition rules) and remember it — it is never stored anywhere by this
+tool and cannot be shown again. On success it prints the new account's id,
+email, display name, role (`system_administrator`), and status (`active`)
+only — never the password or its hash.
+
+Run this exactly once per freshly migrated local database. A second run
+against a database that already has any user refuses with an explicit
+"users table is not empty" error, by design.
+
+### 5. Start the authenticated Go API
+
+With the environment variables from step 3 still set in the same shell:
+
+```powershell
+Set-Location backend
+go run ./cmd/api
+Set-Location ..
+```
+
+Watch for `authentication` `outcome=enabled` in the startup log. The API now
+serves `/api/auth/*` and `/api/admin/*` in addition to its existing routes,
+unchanged for every route outside those two prefixes.
+
+### 6. Start Angular through the local HTTPS proxy
+
+In a separate shell, from `web/`:
+
+```powershell
+npm run local-auth
+```
+
+This runs `ng serve --ssl --proxy-config proxy.conf.json`: it serves the
+Angular app over HTTPS at `https://localhost:4200` (satisfying the `Secure`
+attribute the `__Host-` session/CSRF cookies require — plain HTTP has no
+fallback, in production or locally) and proxies every `/api/*` request to
+`http://127.0.0.1:8080`, so the browser sees one same-origin HTTPS
+application instead of two different origins. `proxy.conf.json` adds no CORS
+header and changes nothing about the backend; it only makes the dev server
+forward requests. `npm start` (plain `ng serve`, no proxy, no HTTPS) and
+`npm run build` are unchanged and unaffected by this script's existence.
+
+### 7. Browser certificate warning
+
+`ng serve --ssl` with no `--ssl-cert`/`--ssl-key` generates a local
+self-signed certificate for `localhost`. The browser will show a private-
+connection/certificate warning the first time you open
+`https://localhost:4200` — this is expected for a self-signed local
+certificate, not a sign of a compromised connection, and applies only to
+this local development server. Accept/proceed past the warning once per
+browser profile (or install a local certificate authority such as mkcert and
+pass it via `--ssl-cert`/`--ssl-key` if you prefer to avoid the warning).
+Never do this against a non-local hostname.
+
+### 8. Complete local end-to-end checklist
+
+With the API (step 5) and Angular (step 6) both running, using the
+administrator created in step 4:
+
+1. **Sign-in**: open `https://localhost:4200/mobile/auth/sign-in`, sign in as
+   the bootstrapped administrator. Confirm `__Host-gfr_session` and
+   `__Host-gfr_csrf` cookies are set (DevTools → Application → Cookies).
+2. **Admin user creation**: as the administrator, use **Add user** to create
+   a second, non-administrator account (for example `dispatcher_operator`).
+   Capture the one-time invitation code shown — it is never shown again.
+3. **First-time access / password creation**: sign out, open
+   `/mobile/auth/first-time-access`, redeem the invitation code, and
+   establish a permanent password for the new account. Confirm the account
+   moves `invited` → `password_change_required` → `active`.
+4. **Sessions**: sign in as the new user, open the sessions screen (or
+   `GET /api/auth/sessions`), and revoke one session; confirm it can no
+   longer be used.
+5. **Suspension**: as the administrator, suspend the second user; confirm
+   their existing session is rejected and sign-in now shows the
+   suspended-account message.
+6. **Role restrictions**: while signed in as the non-administrator account,
+   attempt an `/api/admin/users*` request directly (for example with
+   DevTools or `Invoke-RestMethod`, not only through the hidden UI) and
+   confirm a server-side rejection, not merely a hidden button.
+7. **Logout**: confirm `/api/auth/logout` ends the session server-side (a
+   second use of the same cookie value fails), not merely that the cookie is
+   cleared client-side.
+8. **Audit records**: read-only, confirm rows were recorded for each action
+   above and that none contain a password, hash, or token value:
+
+```powershell
+docker compose --env-file .env exec postgres psql -U gfr_dev -d greenwich_fire_responder_dev -c "SELECT event_type, account_id, actor_id, created_at FROM identity_audit_log ORDER BY created_at;"
+```
+
+### 9. Cleanup: removing local test accounts and sessions
+
+Stop the API and Angular dev server first (Ctrl+C in each shell), then
+decide which cleanup applies.
+
+**Sessions, invitations, password resets, and MFA credentials** are ordinary
+mutable rows and can always be removed for the exact test account ids you
+created:
+
+```sql
+-- Review before deleting.
+SELECT id, normalized_email, role, status FROM users ORDER BY id;
+
+DELETE FROM sessions WHERE user_id IN (<ids>);
+DELETE FROM invitations WHERE user_id IN (<ids>);
+DELETE FROM password_resets WHERE user_id IN (<ids>);
+DELETE FROM mfa_credentials WHERE user_id IN (<ids>);
+```
+
+**The `users` rows themselves usually cannot be deleted**, and this is
+intentional, not a bug: `identity_audit_log.account_id`/`actor_id` reference
+`users.id` with `ON DELETE RESTRICT`, and `identity_audit_log` itself is
+append-only (`ENABLE ALWAYS` triggers reject UPDATE/DELETE/TRUNCATE through
+the ordinary application role, matching the existing
+`unit_status_decisions`/`transcript_reviews` convention). Once a test
+account has signed in, been created, or been acted on by an administrator —
+true for essentially every account exercised by the checklist above — its
+audit rows make `DELETE FROM users WHERE id = ...` fail with a foreign-key
+violation. Do not disable or bypass the audit trigger to force it through.
+
+In practice this means local test accounts are not surgically removable
+once exercised. Two real options:
+
+1. **Leave them.** They are synthetic, clearly test-labeled local rows with
+   no real personal data; suspending or disabling one instead of deleting it
+   is sufficient if you want it inert.
+2. **Reset the whole local database** if you want a completely clean slate:
+
+```powershell
+docker compose --env-file .env down -v postgres
+```
+
+This deletes every table's data, not just the test accounts; you will need
+to reapply every migration from `000001` again afterward.
