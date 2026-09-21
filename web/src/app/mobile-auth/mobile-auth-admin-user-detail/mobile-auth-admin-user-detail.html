@@ -1,0 +1,166 @@
+<section class="auth-screen" aria-labelledby="admin-detail-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="admin-detail-title" tabindex="-1">User detail</h1>
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @if (errorMessage()) {
+      <p class="auth-error">{{ errorMessage() }}</p>
+    }
+    @if (successMessage()) {
+      <p class="auth-success">{{ successMessage() }}</p>
+    }
+  </div>
+
+  @if (loading()) {
+    <p class="auth-lede">Loading…</p>
+  } @else if (notFound()) {
+    <p class="auth-lede">This user was not found, or is outside your authorized scope.</p>
+    <button type="button" class="secondary" (click)="backToList()">Back to Users</button>
+  } @else if (user(); as u) {
+    <dl class="detail-list">
+      <dt>Display name</dt>
+      <dd>{{ u.display_name }}</dd>
+      <dt>Email</dt>
+      <dd>{{ u.email }}</dd>
+      <dt>Role</dt>
+      <dd>{{ u.role }}</dd>
+      <dt>Scope</dt>
+      <dd>{{ u.scope || 'none' }}</dd>
+      <dt>Status</dt>
+      <dd>{{ u.status }}</dd>
+      <dt>Created</dt>
+      <dd>{{ u.created_at | date: 'medium' }}</dd>
+      @if (u.last_login_at) {
+        <dt>Last sign-in</dt>
+        <dd>{{ u.last_login_at | date: 'medium' }}</dd>
+      }
+    </dl>
+
+    @if (isSelf()) {
+      <p class="note">Some actions are unavailable on your own account to prevent lockout.</p>
+    }
+
+    @if (!oneTimeCode()) {
+      <div class="actions-grid">
+        <button type="button" class="secondary" (click)="requestAction('resend-invitation')">
+          Resend invitation
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          [disabled]="isSelf()"
+          (click)="requestAction('suspend')"
+        >
+          Suspend
+        </button>
+        <button
+          type="button"
+          class="danger"
+          [disabled]="isSelf()"
+          (click)="requestAction('disable')"
+        >
+          Disable
+        </button>
+        <button type="button" class="secondary" (click)="requestAction('restore')">Restore</button>
+        <button
+          type="button"
+          class="danger"
+          [disabled]="isSelf()"
+          (click)="requestAction('revoke-sessions')"
+        >
+          Revoke all sessions
+        </button>
+        <button
+          type="button"
+          class="danger"
+          [disabled]="isSelf()"
+          (click)="requestAction('reset-credential')"
+        >
+          Reset credential
+        </button>
+        <button type="button" class="secondary" [disabled]="isSelf()" (click)="openRoleForm()">
+          Change role/scope
+        </button>
+      </div>
+    }
+
+    @if (pendingAction(); as action) {
+      <div
+        class="confirm-dialog"
+        role="alertdialog"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-body"
+      >
+        <p id="confirm-title" class="confirm-title">
+          {{ actionCopy[action].verb }} for {{ u.display_name }} ({{ u.email }})?
+        </p>
+        <p id="confirm-body" class="auth-lede">{{ actionCopy[action].explanation }}</p>
+        <div class="confirm-actions">
+          <button type="button" class="secondary" (click)="cancelAction()">Cancel</button>
+          <button type="button" class="danger" [disabled]="busy()" (click)="confirmAction()">
+            {{ busy() ? 'Working…' : actionCopy[action].verb }}
+          </button>
+        </div>
+      </div>
+    }
+
+    @if (roleFormOpen()) {
+      <form class="role-form" (submit)="submitRoleChange($event)" novalidate>
+        <div class="field">
+          <label for="admin-detail-role">Role</label>
+          <select
+            id="admin-detail-role"
+            name="role"
+            [value]="newRole()"
+            (change)="newRole.set(inputValue($event))"
+          >
+            @for (r of availableRoles(); track r) {
+              <option [value]="r">{{ r }}</option>
+            }
+          </select>
+        </div>
+        <div class="field">
+          <label for="admin-detail-scope">Scope</label>
+          <input
+            id="admin-detail-scope"
+            name="scope"
+            type="text"
+            [value]="newScope()"
+            (input)="newScope.set(inputValue($event))"
+          />
+        </div>
+        <div class="confirm-actions">
+          <button type="button" class="secondary" (click)="cancelRoleForm()">Cancel</button>
+          <button type="submit" class="primary" [disabled]="busy()">Save</button>
+        </div>
+      </form>
+    }
+
+    @if (oneTimeCode(); as code) {
+      <div class="one-time-panel" role="region" aria-labelledby="admin-detail-code-title">
+        <p class="sensitive-label" id="admin-detail-code-title">Sensitive — shown once</p>
+        <p class="auth-lede">
+          Deliver this code to {{ u.display_name }} through an approved channel outside this
+          application. It will not be shown again.
+        </p>
+        <code class="one-time-code">{{ code.code }}</code>
+        <p class="note">Expires {{ code.expiresAt }}.</p>
+        <button type="button" class="secondary" (click)="copyCode()">Copy code</button>
+        <p class="note">
+          Copying places the code on this device's clipboard. Clear your clipboard after delivering
+          it.
+        </p>
+        @if (copied()) {
+          <p class="auth-success" role="status">Copied to clipboard.</p>
+        }
+        <button type="button" class="primary" (click)="dismissCode()">
+          I have delivered this code securely
+        </button>
+      </div>
+    }
+
+    <div class="auth-links">
+      <a routerLink="/mobile/auth/admin/users">Back to Users</a>
+    </div>
+  }
+</section>

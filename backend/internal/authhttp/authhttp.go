@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"time"
 
+	"greenwich-fire-responder/backend/internal/adminservice"
 	"greenwich-fire-responder/backend/internal/authconfig"
 	"greenwich-fire-responder/backend/internal/authcookie"
 	"greenwich-fire-responder/backend/internal/authcsrf"
@@ -37,7 +38,9 @@ const maxRequestBodyBytes = 16 * 1024
 // Handlers holds every dependency the authentication HTTP surface needs.
 // Construct with New; the zero value is not usable.
 type Handlers struct {
-	svc            *identityservice.Service
+	svc   *identityservice.Service
+	admin *adminservice.Service
+
 	csrf           authcsrf.Deriver
 	allowedOrigins map[string]bool
 	ipResolver     clientip.Resolver
@@ -119,6 +122,16 @@ const (
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(ctxPrincipal).(Principal)
 	return p, ok
+}
+
+// SetAdmin attaches the Step 9E administrator user-management service and
+// registers its routes the next time Mux is called. Admin routes are
+// completely absent from the served mux until this is called: an existing
+// caller of New that never calls SetAdmin (every Step 9C/9D test, and any
+// deployment that has not separately wired up adminservice) is entirely
+// unaffected, matching this repository's additive-rollout convention.
+func (h *Handlers) SetAdmin(svc *adminservice.Service) {
+	h.admin = svc
 }
 
 // --- JSON envelope and request-body handling -------------------------------

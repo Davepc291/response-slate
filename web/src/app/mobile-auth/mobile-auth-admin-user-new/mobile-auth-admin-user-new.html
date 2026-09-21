@@ -1,0 +1,132 @@
+<section class="auth-screen" aria-labelledby="admin-new-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="admin-new-title" tabindex="-1">Add user</h1>
+
+  @if (!result()) {
+    <p class="auth-lede">
+      There is no public registration. Every account is created here by an administrator, who
+      receives a one-time invitation code to deliver to the new user through an approved channel.
+    </p>
+
+    <div class="auth-status" role="status" aria-live="polite">
+      @if (errorMessage()) {
+        <p class="auth-error" id="admin-new-error">{{ errorMessage() }}</p>
+      }
+    </div>
+
+    <form (submit)="submit($event)" novalidate>
+      <div class="field">
+        <label for="admin-new-email">Email</label>
+        <input
+          id="admin-new-email"
+          name="email"
+          type="email"
+          autocomplete="off"
+          required
+          [value]="email()"
+          (input)="email.set(inputValue($event))"
+        />
+      </div>
+
+      <div class="field">
+        <label for="admin-new-name">Display name</label>
+        <input
+          id="admin-new-name"
+          name="displayName"
+          type="text"
+          autocomplete="off"
+          required
+          [value]="displayName()"
+          (input)="displayName.set(inputValue($event))"
+        />
+      </div>
+
+      <div class="field">
+        <label for="admin-new-role">Role</label>
+        <select
+          id="admin-new-role"
+          name="role"
+          required
+          [value]="role()"
+          (change)="role.set(inputValue($event))"
+        >
+          <option value="" disabled>Choose a role</option>
+          @for (r of availableRoles(); track r) {
+            <option [value]="r">{{ r }}</option>
+          }
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="admin-new-scope">Scope (department/talkgroup)</label>
+        <input
+          id="admin-new-scope"
+          name="scope"
+          type="text"
+          [value]="scope()"
+          (input)="scope.set(inputValue($event))"
+        />
+      </div>
+
+      <label class="checkbox-row">
+        <input
+          type="checkbox"
+          [checked]="confirmCreate()"
+          (change)="confirmCreate.set(!confirmCreate())"
+        />
+        <span
+          >I understand this creates a real account and a one-time invitation code will be shown
+          exactly once.</span
+        >
+      </label>
+
+      @if (isSystemAdministratorRole()) {
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            [checked]="confirmSystemAdmin()"
+            (change)="confirmSystemAdmin.set(!confirmSystemAdmin())"
+          />
+          <span>I confirm that I intend to create a system administrator account.</span>
+        </label>
+      }
+
+      <button type="submit" class="primary" [disabled]="submitting()">
+        {{ submitting() ? 'Creating…' : 'Create invitation' }}
+      </button>
+    </form>
+
+    <div class="auth-links">
+      <a routerLink="/mobile/auth/admin/users">Cancel</a>
+    </div>
+  } @else {
+    <div class="one-time-panel" role="region" aria-labelledby="admin-new-code-title">
+      <p class="sensitive-label" id="admin-new-code-title">Sensitive — shown once</p>
+      <p class="auth-lede">
+        Invitation created for {{ result()!.email }}. Deliver this code to the user through an
+        approved channel outside this application. It will not be shown again.
+      </p>
+      <code class="one-time-code">{{ result()!.code }}</code>
+      <p class="note">Expires {{ result()!.expiresAt }}.</p>
+
+      <div class="one-time-actions">
+        <button type="button" class="secondary" (click)="copyCode()">Copy code</button>
+        <p class="note">
+          Copying places the code on this device's clipboard. Clear your clipboard after delivering
+          it.
+        </p>
+        @if (copied()) {
+          <p class="auth-success" role="status">Copied to clipboard.</p>
+        }
+      </div>
+
+      @if (!delivered()) {
+        <button type="button" class="primary" (click)="markDelivered()">
+          I have delivered this code securely
+        </button>
+      } @else {
+        <button type="button" class="primary" (click)="dismiss()">Done — return to Users</button>
+      }
+    </div>
+  }
+</section>

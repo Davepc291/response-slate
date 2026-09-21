@@ -1,0 +1,127 @@
+@use '../mobile-auth-forms' as forms;
+
+:host {
+  display: block;
+}
+
+.auth-screen {
+  @include forms.screen-base;
+}
+
+.auth-kicker {
+  @include forms.kicker;
+}
+
+h1 {
+  @include forms.heading;
+}
+
+.auth-lede {
+  @include forms.lede;
+}
+
+.auth-status {
+  @include forms.status-region;
+}
+
+.auth-error {
+  @include forms.error-banner;
+}
+
+.auth-success {
+  @include forms.success-banner;
+}
+
+.note {
+  @include forms.field-hint;
+  color: #9fb0c2;
+}
+
+form {
+  @include forms.form-layout;
+}
+
+.field {
+  @include forms.field;
+
+  select {
+    min-height: 44px;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid #3d5872;
+    border-radius: 0.4rem;
+    background: #0e1620;
+    color: #f2f6fa;
+    font: inherit;
+  }
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  min-height: 44px;
+  color: #d5e2f0;
+  font-size: 0.9rem;
+
+  input[type='checkbox'] {
+    width: 1.2rem;
+    height: 1.2rem;
+    margin-top: 0.15rem;
+    flex: none;
+  }
+}
+
+button.primary {
+  @include forms.primary-button;
+}
+
+button.secondary {
+  @include forms.secondary-button;
+
+  &:focus-visible {
+    @include forms.secondary-button-focus;
+  }
+}
+
+.auth-links {
+  @include forms.link-row;
+}
+
+.one-time-panel {
+  @include forms.card;
+  display: grid;
+  gap: 0.75rem;
+  border-color: #ffd54a;
+}
+
+.sensitive-label {
+  margin: 0;
+  color: #071322;
+  background: #ffd54a;
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 0.3rem;
+  font-weight: 900;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  width: fit-content;
+}
+
+.one-time-code {
+  display: block;
+  padding: 0.75rem;
+  border: 1px dashed #ffd54a;
+  border-radius: 0.4rem;
+  background: #0e1620;
+  color: #ffffff;
+  font-size: 1.05rem;
+  font-weight: 800;
+  word-break: break-all;
+  user-select: all;
+}
+
+.one-time-actions {
+  display: grid;
+  gap: 0.4rem;
+}

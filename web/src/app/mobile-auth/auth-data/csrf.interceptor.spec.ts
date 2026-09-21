@@ -89,6 +89,30 @@ describe('csrfInterceptor', () => {
     req.flush({ status: 'logged_out' });
   });
 
+  it('attaches X-CSRF-Token on POST /api/admin/users (create)', () => {
+    mockCookieHeader('__Host-gfr_csrf=csrf-value-admin-1');
+    http.post('/api/admin/users', {}).subscribe();
+    const req = httpMock.expectOne('/api/admin/users');
+    expect(req.request.headers.get('X-CSRF-Token')).toBe('csrf-value-admin-1');
+    req.flush({});
+  });
+
+  it('attaches X-CSRF-Token on POST /api/admin/users/{id}/suspend', () => {
+    mockCookieHeader('__Host-gfr_csrf=csrf-value-admin-2');
+    http.post('/api/admin/users/42/suspend', {}).subscribe();
+    const req = httpMock.expectOne('/api/admin/users/42/suspend');
+    expect(req.request.headers.get('X-CSRF-Token')).toBe('csrf-value-admin-2');
+    req.flush({});
+  });
+
+  it('does not attach the header to GET /api/admin/users', () => {
+    mockCookieHeader('__Host-gfr_csrf=csrf-value-admin-3');
+    http.get('/api/admin/users').subscribe();
+    const req = httpMock.expectOne('/api/admin/users');
+    expect(req.request.headers.has('X-CSRF-Token')).toBe(false);
+    req.flush({});
+  });
+
   it('ignores a same-named cookie value pair that only prefix-matches the session cookie', () => {
     // Guards against a naive substring/startsWith cookie parse that could
     // accidentally read part of __Host-gfr_session as if it were the CSRF

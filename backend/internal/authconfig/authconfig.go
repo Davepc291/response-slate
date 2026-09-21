@@ -55,6 +55,13 @@ type Options struct {
 	// PasswordResetTTL is Section 4's reset-token expiration window.
 	PasswordResetTTL time.Duration
 
+	// InvitationTTL is Section 2's invitation-token expiration window,
+	// applied by Step 9E's administrator user-management service to
+	// initial issuance, resend, and administrator reset alike. Sourced from
+	// the contract's own reserved GFR_AUTH_INVITATION_TTL variable
+	// (Section 11.5); this package picks no implicit default.
+	InvitationTTL time.Duration
+
 	// CSRFSecret derives the Step 9C signed double-submit CSRF token (see
 	// authcsrf). It is sourced from the contract's own reserved
 	// GFR_AUTH_SESSION_SECRET variable, repurposed: Step 9B's session
@@ -95,6 +102,7 @@ type Options struct {
 var (
 	ErrInvalidSessionTimeouts = errors.New("authconfig: session idle timeout and max lifetime must be positive, with idle timeout not exceeding max lifetime")
 	ErrInvalidResetTTL        = errors.New("authconfig: password reset TTL must be positive")
+	ErrInvalidInvitationTTL   = errors.New("authconfig: invitation TTL must be positive")
 	ErrInvalidOrigins         = errors.New("authconfig: at least one allowed origin (scheme://host[:port], no path) is required")
 	ErrBreachCheckUnavailable = errors.New("authconfig: breach-password checking is enabled but no provider is implemented (Step 9B ships only a no-op checker); leave it disabled")
 )
@@ -110,6 +118,9 @@ func (o Options) Validate() error {
 	}
 	if o.PasswordResetTTL <= 0 {
 		return ErrInvalidResetTTL
+	}
+	if o.InvitationTTL <= 0 {
+		return ErrInvalidInvitationTTL
 	}
 	if len(o.CSRFSecret) < authcsrf.MinSecretLength {
 		return authcsrf.ErrSecretTooShort

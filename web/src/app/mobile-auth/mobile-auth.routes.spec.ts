@@ -7,6 +7,7 @@ import { App } from '../app';
 import { routes } from '../app.routes';
 import { BoardPreview } from '../board-preview/board-preview';
 import { mobileRoutes } from '../mobile/mobile.routes';
+import { requireAdminRole } from './auth-data/require-admin-role.guard';
 import { requireVerifiedSession } from './auth-data/require-verified-session.guard';
 import { mobileAuthRoutes } from './mobile-auth.routes';
 
@@ -91,5 +92,43 @@ describe('mobile auth routes', () => {
       expect(result).toBe(true);
       expect(router.url).toBe(`/mobile/${path}`);
     }
+  });
+
+  it('wires requireVerifiedSession and requireAdminRole onto every admin preview route except access-denied', () => {
+    const shellRoute = mobileAuthRoutes[0];
+    const adminRoute = shellRoute.children?.find((route) => route.path === 'admin');
+    expect(adminRoute).toBeDefined();
+    expect(adminRoute?.canActivate).toBeUndefined();
+
+    const guarded = ['users', 'users/new', 'users/:id'];
+    for (const path of guarded) {
+      const route = adminRoute?.children?.find((r) => r.path === path);
+      expect(route?.canActivate).toEqual([requireVerifiedSession, requireAdminRole]);
+    }
+
+    const accessDenied = adminRoute?.children?.find((r) => r.path === 'access-denied');
+    expect(accessDenied?.canActivate).toBeUndefined();
+  });
+
+  it('redirects an unknown /mobile/auth/admin/** path to the user list, not sign-in', async () => {
+    const adminRoute = mobileAuthRoutes[0].children?.find((route) => route.path === 'admin');
+    const wildcard = adminRoute?.children?.find((route) => route.path === '**');
+    expect(wildcard?.redirectTo).toBe('users');
+  });
+
+  it('reaches the unguarded access-denied screen directly', async () => {
+    configure();
+    const fixture = TestBed.createComponent(App);
+    const router = TestBed.inject(Router);
+
+    const result = await router.navigateByUrl('/mobile/auth/admin/access-denied');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(result).toBe(true);
+    expect(router.url).toBe('/mobile/auth/admin/access-denied');
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('h1')?.textContent).toContain('Access denied');
+    fixture.destroy();
   });
 });

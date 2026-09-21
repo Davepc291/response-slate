@@ -20,6 +20,7 @@ func validAuthEnv(t *testing.T) {
 	t.Setenv("GFR_AUTH_SESSION_IDLE_TIMEOUT", "15m")
 	t.Setenv("GFR_AUTH_SESSION_MAX_LIFETIME", "12h")
 	t.Setenv("GFR_AUTH_PASSWORD_RESET_TTL", "1h")
+	t.Setenv("GFR_AUTH_INVITATION_TTL", "24h")
 	t.Setenv("GFR_AUTH_SESSION_SECRET", "01234567890123456789012345678901")
 	t.Setenv("GFR_AUTH_ALLOWED_ORIGINS", "https://app.example.test")
 	t.Setenv("GFR_AUTH_RATE_LIMIT_PER_ACCOUNT", "5/15m")

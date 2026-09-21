@@ -1,0 +1,98 @@
+<section class="auth-screen" aria-labelledby="admin-users-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <div class="admin-header-row">
+    <h1 id="admin-users-title" tabindex="-1">Users</h1>
+    @if (canAddUser()) {
+      <a class="primary-link" routerLink="/mobile/auth/admin/users/new">Add user</a>
+    }
+  </div>
+
+  <form class="filters" (submit)="applyFilters($event)" novalidate>
+    <div class="field">
+      <label for="admin-users-search">Search</label>
+      <input
+        id="admin-users-search"
+        name="search"
+        type="text"
+        [value]="search()"
+        (input)="search.set(inputValue($event))"
+        maxlength="200"
+        placeholder="Name or email"
+      />
+    </div>
+    <div class="field">
+      <label for="admin-users-role">Role</label>
+      <select
+        id="admin-users-role"
+        name="role"
+        [value]="roleFilter()"
+        (change)="roleFilter.set(inputValue($event))"
+      >
+        <option value="">Any role</option>
+        @for (r of roleOptions; track r) {
+          <option [value]="r">{{ r }}</option>
+        }
+      </select>
+    </div>
+    <div class="field">
+      <label for="admin-users-status">Status</label>
+      <select
+        id="admin-users-status"
+        name="status"
+        [value]="statusFilter()"
+        (change)="statusFilter.set(inputValue($event))"
+      >
+        <option value="">Any status</option>
+        @for (s of statusOptions; track s) {
+          <option [value]="s">{{ s }}</option>
+        }
+      </select>
+    </div>
+    <button type="submit" class="secondary">Apply filters</button>
+  </form>
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @switch (state()) {
+      @case ('loading') {
+        <p class="auth-lede">Loading users…</p>
+      }
+      @case ('unavailable') {
+        <p class="auth-error">
+          Unable to load users right now.
+          <button type="button" class="link-button" (click)="retry()">Retry</button>
+        </p>
+      }
+      @case ('unauthorized') {
+        <p class="auth-error">You are not authorized to view this list.</p>
+      }
+      @case ('empty') {
+        <p class="auth-lede">No users match the current filters.</p>
+      }
+    }
+  </div>
+
+  @if (state() === 'ready' || state() === 'empty') {
+    <ul class="user-list">
+      @for (u of users(); track u.id) {
+        <li class="user-item">
+          <a [routerLink]="['/mobile/auth/admin/users', u.id]" class="user-link">
+            <span class="user-name">{{ u.display_name }}</span>
+            <span class="user-email">{{ u.email }}</span>
+            <span class="user-meta"
+              >{{ u.role }} · {{ u.scope || 'no scope' }} · {{ u.status }}</span
+            >
+          </a>
+        </li>
+      }
+    </ul>
+
+    <div class="pagination">
+      <button type="button" class="secondary" [disabled]="offset() === 0" (click)="previousPage()">
+        Previous
+      </button>
+      <button type="button" class="secondary" [disabled]="users().length < 25" (click)="nextPage()">
+        Next
+      </button>
+    </div>
+  }
+</section>

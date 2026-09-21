@@ -11,6 +11,7 @@ func validOptions() Options {
 		SessionIdleTimeout:             15 * time.Minute,
 		SessionMaxLifetime:             12 * time.Hour,
 		PasswordResetTTL:               time.Hour,
+		InvitationTTL:                  24 * time.Hour,
 		CSRFSecret:                     []byte("01234567890123456789012345678901"),
 		AllowedOrigins:                 []string{"https://app.example.test"},
 		LoginRateLimitPerAccount:       RateLimit{MaxAttempts: 5, Window: 15 * time.Minute},

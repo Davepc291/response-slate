@@ -570,3 +570,118 @@ func TestLiveConcurrentInvitationRedemption(t *testing.T) {
 		t.Fatalf("expected every other concurrent attempt to fail as invalid, got %d", invalids)
 	}
 }
+
+// TestLiveListUsers exercises ListUsers (Step 9E) against a real database:
+// scope filtering, role filtering, status filtering, bounded search, and
+// limit/offset pagination all round-trip correctly through actual SQL,
+// which the fake stores used by adminservice's/authhttp's own unit tests
+// cannot verify.
+func TestLiveListUsers(t *testing.T) {
+	pool := liveTestPool(t)
+	ctx, tx, p := beginRollback(t, pool)
+	adminID := insertBootstrapAdmin(ctx, t, tx)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	makeUser := func(displayName string, role identity.Role, scope identity.Scope, status identity.AccountState) identity.UserID {
+		tok, _ := invitation.GenerateToken()
+		id, err := p.CreateUserAndInvite(ctx, NewUserParams{
+			Email: uniqueEmail(t), DisplayName: displayName, Role: role, Scope: scope, CreatedBy: adminID,
+			InvitationTokenDigest: invitation.Digest(tok), InvitationExpiresAt: now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("fixture creation failed: %v", err)
+		}
+		if status == identity.StateActive || status == identity.StateSuspended {
+			// Both require a permanent password on this fixture path: active
+			// per the users_active_requires_password CHECK constraint, and
+			// suspended here only because these fixtures represent an
+			// administrator suspending a previously-active account, not a
+			// still-invited one.
+			if _, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1, password_updated_at = $2 WHERE id = $3`,
+				"$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g", now, int64(id)); err != nil {
+				t.Fatalf("fixture password update failed: %v", err)
+			}
+		}
+		if status != identity.StateInvited {
+			if _, err := tx.Exec(ctx, `UPDATE users SET status = $1 WHERE id = $2`, string(status), int64(id)); err != nil {
+				t.Fatalf("fixture status update failed: %v", err)
+			}
+		}
+		return id
+	}
+
+	engine1 := identity.Scope("live-list-engine-1")
+	engine2 := identity.Scope("live-list-engine-2")
+	makeUser("Live List Alpha", identity.RoleResponder, engine1, identity.StateActive)
+	makeUser("Live List Bravo", identity.RoleResponder, engine2, identity.StateActive)
+	c := makeUser("Live List Charlie Searchable", identity.RoleDispatcherOperator, engine1, identity.StateSuspended)
+
+	// Scope filtering.
+	scoped, err := p.ListUsers(ctx, ListUsersFilter{Scope: &engine1})
+	if err != nil {
+		t.Fatalf("ListUsers by scope failed: %v", err)
+	}
+	if len(scoped) != 2 {
+		t.Fatalf("expected 2 users in %s, got %d", engine1, len(scoped))
+	}
+
+	// Role filtering combined with scope.
+	role := identity.RoleDispatcherOperator
+	byRole, err := p.ListUsers(ctx, ListUsersFilter{Scope: &engine1, Role: &role})
+	if err != nil {
+		t.Fatalf("ListUsers by role failed: %v", err)
+	}
+	if len(byRole) != 1 || byRole[0].ID != c {
+		t.Fatalf("expected exactly Charlie for role filter, got %+v", byRole)
+	}
+
+	// Status filtering.
+	status := identity.StateSuspended
+	byStatus, err := p.ListUsers(ctx, ListUsersFilter{Status: &status})
+	if err != nil {
+		t.Fatalf("ListUsers by status failed: %v", err)
+	}
+	for _, u := range byStatus {
+		if u.Status != identity.StateSuspended {
+			t.Fatalf("expected only suspended accounts, got %+v", u)
+		}
+	}
+
+	// Bounded, LIKE-escaped search on display name.
+	bySearch, err := p.ListUsers(ctx, ListUsersFilter{Search: "Searchable"})
+	if err != nil {
+		t.Fatalf("ListUsers by search failed: %v", err)
+	}
+	if len(bySearch) != 1 || bySearch[0].ID != c {
+		t.Fatalf("expected exactly Charlie for search, got %+v", bySearch)
+	}
+
+	// A search string containing raw LIKE metacharacters must not change
+	// matching behavior (escaped, not interpreted as a wildcard).
+	literalPercent, err := p.ListUsers(ctx, ListUsersFilter{Search: "%"})
+	if err != nil {
+		t.Fatalf("ListUsers with a literal '%%' search failed: %v", err)
+	}
+	if len(literalPercent) != 0 {
+		t.Fatalf("expected a literal '%%' search to match nothing, got %+v", literalPercent)
+	}
+
+	// Pagination: limit 1, offset 1 within engine1 returns the second row
+	// in id order.
+	page, err := p.ListUsers(ctx, ListUsersFilter{Scope: &engine1, Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatalf("ListUsers pagination failed: %v", err)
+	}
+	if len(page) != 1 || page[0].ID != c {
+		t.Fatalf("expected the second engine1 row (Charlie) at offset 1, got %+v", page)
+	}
+
+	// An out-of-bound limit is silently clamped, not rejected.
+	clamped, err := p.ListUsers(ctx, ListUsersFilter{Scope: &engine1, Limit: 100000})
+	if err != nil {
+		t.Fatalf("ListUsers with an oversized limit failed: %v", err)
+	}
+	if len(clamped) != 2 {
+		t.Fatalf("expected the oversized limit to be clamped to still return both engine1 rows, got %d", len(clamped))
+	}
+}

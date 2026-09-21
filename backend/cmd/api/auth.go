@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"greenwich-fire-responder/backend/internal/adminservice"
 	"greenwich-fire-responder/backend/internal/authhttp"
 	"greenwich-fire-responder/backend/internal/config"
 	"greenwich-fire-responder/backend/internal/identityauditstore"
@@ -82,5 +83,17 @@ func buildAuthHandlers(ctx context.Context, cfg config.Config, logger *slog.Logg
 		pool.Close()
 		return nil, nil, err
 	}
+
+	// Step 9E: the administrator user-management API is wired up under the
+	// identical cfg.Auth.Enabled gate as everything else in this function —
+	// it never seeds an administrator, so it is reachable only once some
+	// separate, out-of-band process provisions the first one (see
+	// identitystore's integration test fixtures for how that is done in a
+	// test-only context).
+	adminSvc := adminservice.New(store, auditStore, adminservice.Config{
+		InvitationTTL: cfg.Auth.InvitationTTL,
+	}, logger)
+	handlers.SetAdmin(adminSvc)
+
 	return handlers, pool.Close, nil
 }

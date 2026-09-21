@@ -30,9 +30,13 @@ import "net/http"
 //     line; this package's handlers also never log a request path, body,
 //     or token value.
 //
-// Administrator user-management routes (/api/admin/*) and MFA enrollment
-// are out of Step 9C's scope entirely (no administrator Users screen, no
-// MFA enrollment) and are not registered here.
+// MFA enrollment is out of scope entirely (no MFA provider is implemented)
+// and is not registered here. Administrator user-management routes
+// (/api/admin/users*) are a Step 9E addition, registered by
+// registerAdminRoutes only when SetAdmin has been called: a caller that
+// never calls SetAdmin (every Step 9C/9D test, and any deployment that has
+// not separately wired up adminservice) serves the identical route set as
+// before Step 9E.
 func (h *Handlers) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -46,6 +50,10 @@ func (h *Handlers) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /api/auth/logout-all", h.requireSession(h.requireCSRF(h.handleLogoutAll)))
 	mux.HandleFunc("GET /api/auth/sessions", h.requireSession(h.handleListSessions))
 	mux.HandleFunc("DELETE /api/auth/sessions/{id}", h.requireSession(h.requireCSRF(h.handleRevokeSession)))
+
+	if h.admin != nil {
+		h.registerAdminRoutes(mux)
+	}
 
 	return mux
 }

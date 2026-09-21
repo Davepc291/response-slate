@@ -7,13 +7,16 @@ const CSRF_COOKIE_NAME = '__Host-gfr_csrf';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-// The exact set of same-origin /api/auth routes backend/internal/authhttp's
-// Mux wraps with requireCSRF. Login, first-time-login, and both
-// password-reset routes are pre-session and are NOT wrapped there, so this
-// interceptor deliberately does not attach a header for them either — an
-// unnecessary header would do nothing useful and this list exists so the
-// interceptor's behavior can be verified against the backend route table
-// directly, not "every mutating request".
+// The exact set of same-origin /api/auth and /api/admin routes
+// backend/internal/authhttp's Mux wraps with requireCSRF. Login,
+// first-time-login, and both password-reset routes are pre-session and are
+// NOT wrapped there, so this interceptor deliberately does not attach a
+// header for them either — an unnecessary header would do nothing useful
+// and this list exists so the interceptor's behavior can be verified
+// against the backend route table directly, not "every mutating request".
+// Every /api/admin/users* mutating route (Step 9E) requires it: creation
+// (POST /api/admin/users) and every per-user action route
+// (POST /api/admin/users/{id}/...).
 function requiresCsrfHeader(pathname: string, method: string): boolean {
   if (!STATE_CHANGING_METHODS.has(method)) {
     return false;
@@ -21,7 +24,10 @@ function requiresCsrfHeader(pathname: string, method: string): boolean {
   if (pathname === '/api/auth/logout' || pathname === '/api/auth/logout-all') {
     return true;
   }
-  return pathname.startsWith('/api/auth/sessions/');
+  if (pathname.startsWith('/api/auth/sessions/')) {
+    return true;
+  }
+  return pathname === '/api/admin/users' || pathname.startsWith('/api/admin/users/');
 }
 
 function readCsrfCookie(): string | null {

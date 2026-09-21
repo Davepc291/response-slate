@@ -40,6 +40,7 @@ func loadAuth(o *authconfig.Options) error {
 		"GFR_AUTH_SESSION_IDLE_TIMEOUT": &o.SessionIdleTimeout,
 		"GFR_AUTH_SESSION_MAX_LIFETIME": &o.SessionMaxLifetime,
 		"GFR_AUTH_PASSWORD_RESET_TTL":   &o.PasswordResetTTL,
+		"GFR_AUTH_INVITATION_TTL":       &o.InvitationTTL,
 	} {
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 			d, err := time.ParseDuration(v)

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"greenwich-fire-responder/backend/internal/adminservice"
 	"greenwich-fire-responder/backend/internal/authconfig"
 	"greenwich-fire-responder/backend/internal/authcookie"
 	"greenwich-fire-responder/backend/internal/identity"
@@ -30,6 +31,7 @@ func testAuthOptions() authconfig.Options {
 		SessionIdleTimeout:             15 * time.Minute,
 		SessionMaxLifetime:             12 * time.Hour,
 		PasswordResetTTL:               time.Hour,
+		InvitationTTL:                  24 * time.Hour,
 		CSRFSecret:                     []byte("01234567890123456789012345678901"),
 		AllowedOrigins:                 []string{testOrigin},
 		LoginRateLimitPerAccount:       authconfig.RateLimit{MaxAttempts: 5, Window: 15 * time.Minute},
@@ -68,6 +70,8 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	adminSvc := adminservice.New(store, audit, adminservice.Config{InvitationTTL: 24 * time.Hour}, nil)
+	handlers.SetAdmin(adminSvc)
 	hn := &harness{t: t, h: handlers, store: store, audit: audit, now: fixedNow, remote: "203.0.113.10:5555"}
 	handlers.clock = func() time.Time { return hn.now }
 	hn.mux = handlers.Mux()
