@@ -1,0 +1,90 @@
+@use '../mobile-auth-forms' as forms;
+
+:host {
+  display: block;
+}
+
+.auth-screen {
+  @include forms.screen-base;
+}
+
+.auth-kicker {
+  @include forms.kicker;
+}
+
+h1 {
+  @include forms.heading;
+}
+
+.auth-lede {
+  @include forms.lede;
+}
+
+.auth-status {
+  @include forms.status-region;
+}
+
+.auth-error {
+  @include forms.error-banner;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.session-item {
+  @include forms.card;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.session-item.current {
+  border-color: #6ea8e8;
+}
+
+.session-info {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.session-label {
+  color: #f2f6fa;
+  font-weight: 800;
+}
+
+.session-current-badge {
+  color: #6ea8e8;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-meta {
+  color: #9fb0c2;
+  font-size: 0.8rem;
+}
+
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+button.secondary {
+  @include forms.secondary-button;
+}
+
+button.secondary:focus-visible {
+  @include forms.secondary-button-focus;
+}
+
+button.danger {
+  @include forms.danger-button;
+}

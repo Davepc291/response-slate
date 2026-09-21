@@ -16,7 +16,7 @@ import { MobileWelcome } from './mobile-welcome/mobile-welcome';
 describe('mobile routes', () => {
   it('preserves the desktop board as the exact root route', () => {
     expect(routes[0]).toEqual({ path: '', component: BoardPreview, pathMatch: 'full' });
-    expect(routes[1]?.path).toBe('mobile');
+    expect(routes.some((route) => route.path === 'mobile')).toBe(true);
   });
 
   it('loads the existing BoardPreview at /', async () => {

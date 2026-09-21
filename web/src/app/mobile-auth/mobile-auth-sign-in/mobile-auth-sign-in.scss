@@ -1,0 +1,59 @@
+@use '../mobile-auth-forms' as forms;
+
+:host {
+  display: block;
+}
+
+.auth-screen {
+  @include forms.screen-base;
+}
+
+.auth-kicker {
+  @include forms.kicker;
+}
+
+h1 {
+  @include forms.heading;
+}
+
+.auth-lede {
+  @include forms.lede;
+  font-weight: 700;
+  color: #dbeaff;
+}
+
+.auth-status {
+  @include forms.status-region;
+}
+
+.auth-error {
+  @include forms.error-banner;
+}
+
+form {
+  @include forms.form-layout;
+}
+
+.field {
+  @include forms.field;
+}
+
+.password-row {
+  @include forms.password-row;
+}
+
+.visibility-toggle {
+  @include forms.secondary-button;
+}
+
+.visibility-toggle:focus-visible {
+  @include forms.secondary-button-focus;
+}
+
+button.primary {
+  @include forms.primary-button;
+}
+
+.auth-links {
+  @include forms.link-row;
+}

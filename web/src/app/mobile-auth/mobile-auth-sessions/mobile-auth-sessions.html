@@ -1,0 +1,50 @@
+<section class="auth-screen" aria-labelledby="auth-sessions-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="auth-sessions-title" tabindex="-1">Sessions</h1>
+  @if (account(); as account) {
+    <p class="auth-lede">Signed in as {{ account.display_name || account.email }}.</p>
+  }
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @if (errorMessage()) {
+      <p class="auth-error">{{ errorMessage() }}</p>
+    }
+  </div>
+
+  @if (loading()) {
+    <p class="auth-lede">Loading sessions…</p>
+  } @else {
+    <ul class="session-list">
+      @for (item of sessions(); track item.id) {
+        <li class="session-item" [class.current]="item.current">
+          <div class="session-info">
+            <span class="session-label">{{ item.device_hint || 'Unlabeled device' }}</span>
+            @if (item.current) {
+              <span class="session-current-badge">This device</span>
+            }
+            <span class="session-meta">Last active {{ item.last_seen_at | date: 'medium' }}</span>
+          </div>
+          @if (!item.current) {
+            <button
+              type="button"
+              class="secondary"
+              [disabled]="busySessionId() !== null"
+              (click)="revoke(item.id)"
+            >
+              {{ busySessionId() === item.id ? 'Revoking…' : 'Revoke' }}
+            </button>
+          }
+        </li>
+      }
+    </ul>
+  }
+
+  <div class="session-actions">
+    <button type="button" class="secondary" [disabled]="signingOut()" (click)="signOut()">
+      Log out
+    </button>
+    <button type="button" class="danger" [disabled]="signingOut()" (click)="signOutEverywhere()">
+      Log out everywhere
+    </button>
+  </div>
+</section>

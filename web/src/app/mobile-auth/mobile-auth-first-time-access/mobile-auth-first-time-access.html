@@ -1,0 +1,100 @@
+<section class="auth-screen" aria-labelledby="auth-fta-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="auth-fta-title" tabindex="-1">First-time access</h1>
+  <p class="auth-lede">
+    Enter the single-use invitation code your administrator provided and choose a permanent
+    password. The code expires and can be used only once.
+  </p>
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @if (errorMessage()) {
+      <p class="auth-error" id="auth-fta-error">{{ errorMessage() }}</p>
+    }
+    @if (verificationNeeded()) {
+      <p class="auth-info">
+        Additional verification is required before this account can sign in. Contact your
+        administrator.
+      </p>
+    }
+    @if (successMessage()) {
+      <p class="auth-success">
+        {{ successMessage() }}
+        <a routerLink="/mobile/auth/sign-in">Continue to sign in</a>
+      </p>
+    }
+  </div>
+
+  @if (!successMessage() && !verificationNeeded()) {
+    <form (submit)="submit($event)" novalidate>
+      <div class="field">
+        <label for="auth-fta-code">Invitation code</label>
+        <input
+          id="auth-fta-code"
+          name="code"
+          type="text"
+          autocomplete="one-time-code"
+          required
+          [value]="code()"
+          (input)="code.set(inputValue($event))"
+          [attr.aria-invalid]="errorMessage() ? true : null"
+          [attr.aria-describedby]="errorMessage() ? 'auth-fta-error' : null"
+        />
+      </div>
+
+      <div class="field">
+        <label for="auth-fta-password">New password</label>
+        <div class="password-row">
+          <input
+            id="auth-fta-password"
+            name="newPassword"
+            [type]="passwordFieldType()"
+            autocomplete="new-password"
+            required
+            [value]="newPassword()"
+            (input)="newPassword.set(inputValue($event))"
+            [attr.aria-invalid]="errorMessage() ? true : null"
+          />
+          <button
+            type="button"
+            class="visibility-toggle"
+            (click)="togglePasswordVisibility()"
+            [attr.aria-pressed]="passwordVisible()"
+          >
+            {{ passwordVisible() ? 'Hide password' : 'Show password' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="auth-fta-confirm">Confirm new password</label>
+        <input
+          id="auth-fta-confirm"
+          name="confirmPassword"
+          [type]="passwordFieldType()"
+          autocomplete="new-password"
+          required
+          [value]="confirmPassword()"
+          (input)="confirmPassword.set(inputValue($event))"
+          [attr.aria-invalid]="mismatch() ? true : null"
+          [attr.aria-describedby]="mismatch() ? 'auth-fta-mismatch' : null"
+        />
+        @if (mismatch()) {
+          <p class="field-hint" id="auth-fta-mismatch">Passwords do not match.</p>
+        }
+      </div>
+
+      <p class="auth-note">
+        Choose a password at least 12 characters long. There is no forced mix of uppercase, numbers,
+        or symbols — a longer passphrase is stronger than a short, complex one.
+      </p>
+
+      <button type="submit" class="primary" [disabled]="submitting()">
+        {{ submitting() ? 'Setting password…' : 'Set password' }}
+      </button>
+    </form>
+  }
+
+  <div class="auth-links">
+    <a routerLink="/mobile/auth/sign-in">Back to sign in</a>
+  </div>
+</section>

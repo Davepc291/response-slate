@@ -1,0 +1,126 @@
+:host {
+  --auth-bg: #0b0f14;
+  --auth-panel: #141c27;
+  --auth-panel-raised: #1a2531;
+  --auth-border: #3d5872;
+  --auth-text: #f2f6fa;
+  --auth-muted: #c1cfdd;
+  // Deliberately a different accent (blue) from MobileShell's amber
+  // (--mobile-accent), so the real authentication surface is visually
+  // distinct from the synthetic preview surface at a glance.
+  --auth-accent: #6ea8e8;
+  --auth-danger: #ff8a80;
+  display: block;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--auth-bg);
+  color: var(--auth-text);
+}
+
+.mobile-auth-app {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background:
+    radial-gradient(circle at 50% -12rem, rgba(110, 168, 232, 0.22), transparent 32rem),
+    var(--auth-bg);
+}
+
+.mobile-auth-header {
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 34rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  gap: 0.4rem;
+  padding: calc(0.6rem + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right))
+    0.55rem calc(0.75rem + env(safe-area-inset-left));
+  border-bottom: 1px solid var(--auth-border);
+  background: rgba(11, 15, 20, 0.98);
+}
+
+.mobile-auth-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.mobile-auth-mode {
+  color: var(--auth-accent);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.mobile-auth-product {
+  color: var(--auth-text);
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.mobile-auth-warnings {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.mobile-auth-warning {
+  margin: 0;
+  padding: 0.34rem 0.48rem;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  font-weight: 900;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.mobile-auth-warning-shadow {
+  border-color: #ffea8a;
+  background: #ffd54a;
+  color: #1a1200;
+  letter-spacing: 0.03em;
+}
+
+.mobile-auth-warning-synthetic {
+  border-color: #8fa5ba;
+  background: #1e2a38;
+  color: #ffffff;
+}
+
+.mobile-auth-loading {
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 34rem;
+  margin: 0;
+  padding: 0.55rem calc(0.75rem + env(safe-area-inset-right)) 0.55rem
+    calc(0.75rem + env(safe-area-inset-left));
+  border-bottom: 1px solid #35507a;
+  background: #172336;
+  color: #d7e6fb;
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.mobile-auth-main {
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 34rem;
+  flex: 1;
+  padding: 1rem calc(0.85rem + env(safe-area-inset-right))
+    calc(1.25rem + env(safe-area-inset-bottom)) calc(0.85rem + env(safe-area-inset-left));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

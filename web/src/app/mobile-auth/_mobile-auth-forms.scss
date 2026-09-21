@@ -1,0 +1,227 @@
+// Shared style building blocks for the /mobile/auth/** screens. Each
+// screen's own .scss file `@use`s this partial rather than repeating the
+// same form/button/status rules six times. Color tokens intentionally
+// reuse the blue --auth-accent family defined on MobileAuthShell's :host,
+// not MobileShell's amber synthetic-preview accent.
+
+@mixin screen-base {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-width: 30rem;
+}
+
+@mixin kicker {
+  margin: 0;
+  color: #acc9e5;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@mixin heading {
+  margin: 0;
+  color: #ffffff;
+  font-size: clamp(1.35rem, 6vw, 1.85rem);
+  line-height: 1.12;
+
+  &:focus {
+    outline: none;
+  }
+}
+
+@mixin lede {
+  margin: 0;
+  color: #c1cfdd;
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+@mixin status-region {
+  min-height: 0;
+}
+
+@mixin error-banner {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #ff8a80;
+  background: #3a1414;
+  color: #ffd9d6;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+@mixin success-banner {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #6ea8e8;
+  background: #10233a;
+  color: #dbeaff;
+  font-size: 0.9rem;
+  font-weight: 700;
+
+  a {
+    color: #ffd54a;
+    font-weight: 800;
+  }
+}
+
+@mixin info-banner {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #8fa5ba;
+  background: #1e2a38;
+  color: #f2f6fa;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+@mixin field-hint {
+  margin: 0;
+  color: #ffb3ab;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+@mixin form-layout {
+  display: grid;
+  gap: 0.85rem;
+}
+
+@mixin field {
+  display: grid;
+  gap: 0.3rem;
+
+  label {
+    color: #d5e2f0;
+    font-size: 0.86rem;
+    font-weight: 700;
+  }
+
+  input {
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid #3d5872;
+    border-radius: 0.4rem;
+    background: #0e1620;
+    color: #f2f6fa;
+    font: inherit;
+  }
+
+  input:focus-visible {
+    outline: 3px solid #6ea8e8;
+    outline-offset: 1px;
+  }
+
+  input[aria-invalid='true'] {
+    border-color: #ff8a80;
+  }
+}
+
+@mixin password-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+
+  input {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+@mixin secondary-button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 0.75rem;
+  border: 1px solid #3d5872;
+  border-radius: 0.4rem;
+  background: #17222f;
+  color: #dbeaff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+@mixin secondary-button-focus {
+  outline: 3px solid #6ea8e8;
+  outline-offset: 2px;
+}
+
+@mixin primary-button {
+  min-height: 48px;
+  border: 2px solid #bcd8fb;
+  border-radius: 0.45rem;
+  background: #6ea8e8;
+  color: #071322;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 3px solid #ffd54a;
+    outline-offset: 3px;
+  }
+}
+
+@mixin link-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  a {
+    color: #9fc5ea;
+    font-weight: 700;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  a:focus-visible {
+    outline: 3px solid #6ea8e8;
+    outline-offset: 2px;
+  }
+}
+
+@mixin danger-button {
+  min-height: 44px;
+  padding: 0 0.85rem;
+  border: 2px solid #ff8a80;
+  border-radius: 0.4rem;
+  background: #3a1414;
+  color: #ffd9d6;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 3px solid #ffd54a;
+    outline-offset: 2px;
+  }
+}
+
+@mixin note {
+  margin: 0;
+  color: #9fb0c2;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+@mixin card {
+  padding: 0.85rem;
+  border: 1px solid #3d5872;
+  border-radius: 0.6rem;
+  background: #141c27;
+}
