@@ -1,5 +1,80 @@
 # Local development database
 
+## Migration 000008: identity/authorization foundation (Step 9B)
+
+Apply once after `000007` to the existing local development PostgreSQL service.
+Migrations 000001-000007 remain unchanged. This migration adds exactly the six
+tables authorized by
+[the Step 9B task](../docs/authentication-authorization-v1.md#11-proposed-technical-surface)
+for the approved Step 9A contract: `users`, `invitations`, `password_resets`,
+`sessions`, `mfa_credentials`, and `identity_audit_log`. It inserts no default
+administrator, adds no HTTP endpoint, constructs no cookie, and integrates no
+WebAuthn/TOTP/identity provider. No plaintext password, invitation token,
+reset token, or session token column exists anywhere in this schema; every
+credential-shaped column stores a cryptographic hash/digest only.
+
+`users` holds one row per account: a normalized (lowercased, grammar-checked)
+unique email, display name, role, a placeholder `scope` text column (the
+department/scope model itself remains an
+[unresolved contract question](../docs/authentication-authorization-v1.md#15-unresolved-questions)),
+status, and a PHC-encoded Argon2id password hash that is `NULL` until a
+permanent password is established. A `CHECK` constraint enforces that
+`active` status always has a password hash, restating the contract's "no
+account reaches active without passing through password-change-required"
+rule at the schema level. `normalized_email` is unique forever, including
+disabled/expired accounts: an email is never reused by a second identity.
+
+`invitations` and `password_resets` are append-only-per-issuance: each
+issuance is a new row, resending/reissuing marks the prior row `superseded`
+rather than rewriting it, and a partial unique index enforces at most one
+`pending` row per user per table. Both store only a 32-byte SHA-256
+`token_digest`; the raw token is generated with `crypto/rand` in the Go
+`invitation`/`passwordreset` packages and is never persisted or logged.
+
+`sessions` stores one row per issued session, `token_digest` only, an
+absolute `expires_at`, and paired `revoked_at`/`revocation_reason` columns
+(`logout`, `logout_all`, `password_reset`, `account_disabled`,
+`account_suspended`, `admin_revoke`, `superseded`). Idle-timeout evaluation
+is an application-layer comparison against `last_seen_at`, since the exact
+idle-timeout duration is a caller-supplied,
+[unresolved policy value](../docs/authentication-authorization-v1.md#15-unresolved-questions).
+
+`mfa_credentials` is provider-neutral storage only: no WebAuthn or TOTP
+provider integration exists yet, and no secret key material for a passkey is
+ever stored (a TOTP secret, if that method is ever wired up, is stored only
+encrypted/hashed).
+
+`identity_audit_log` is an append-only, `ENABLE ALWAYS`-trigger-protected
+audit table matching the existing `detection_audit`/`alert_events`
+convention, restricted to the fixed event-type list from
+[Section 10](../docs/authentication-authorization-v1.md#10-audit-and-security-events)
+and a size-bounded, allow-listed `jsonb` metadata column. The Go
+`identityaudit` package enforces the metadata allow-list before any insert;
+the column bound is defense in depth, not the primary control.
+
+```powershell
+Get-Content -Raw database/migrations/000008_identity_foundation.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000008 failed.' }
+Get-Content -Raw database/tests/000008_schema_test.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Identity schema tests failed.' }
+```
+
+Check `schema_migrations` before applying: rerunning this migration fails and
+rolls back; the API and CLI never auto-migrate. Run existing SQL suites
+000001-000007 as well when initially applying this schema. All fixtures are
+synthetic and roll back; no real name, email, or credential appears in the
+migration or its test. The new `backend/internal/identitystore` and
+`backend/internal/identityauditstore` (persistence), and the
+`backend/internal/identity`, `backend/internal/passwordpolicy`,
+`backend/internal/invitation`, `backend/internal/passwordreset`,
+`backend/internal/session`, `backend/internal/authorization`, and
+`backend/internal/identityaudit` (domain) packages, are never registered by
+the live server (`backend/cmd/api`); they are dormant until a test or a
+future authorized integration constructs and calls them explicitly. No HTTP
+handler, route guard, cookie, login screen, or admin UI is added by Step 9B.
+
 ## Migration 000007: synthetic alert persistence (Step 8C)
 
 Apply once after `000006` to the existing local development PostgreSQL service.
