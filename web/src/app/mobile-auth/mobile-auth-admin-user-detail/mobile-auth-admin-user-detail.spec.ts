@@ -31,11 +31,15 @@ describe('MobileAuthAdminUserDetail', () => {
   let resendInvitation: ReturnType<
     typeof vi.fn<() => ReturnType<AdminApiService['resendInvitation']>>
   >;
+  let resetCredential: ReturnType<
+    typeof vi.fn<() => ReturnType<AdminApiService['resetCredential']>>
+  >;
 
   function configure(selfUserId = 1) {
     getUser = vi.fn().mockReturnValue(of<AdminResult<AdminUserView>>({ ok: true, value: USER }));
     suspend = vi.fn();
     resendInvitation = vi.fn();
+    resetCredential = vi.fn();
 
     TestBed.configureTestingModule({
       imports: [MobileAuthAdminUserDetail],
@@ -51,7 +55,7 @@ describe('MobileAuthAdminUserDetail', () => {
             restore: vi.fn(),
             revokeSessions: vi.fn(),
             resendInvitation,
-            resetCredential: vi.fn(),
+            resetCredential,
             changeRole: vi.fn(),
           },
         },
@@ -208,6 +212,103 @@ describe('MobileAuthAdminUserDetail', () => {
     fixture.detectChanges();
 
     expect(el.textContent).not.toContain('resend-code-xyz');
+    fixture.destroy();
+  });
+
+  it('reissues a credential-reset code for an already password_change_required account, showing only the newest code', () => {
+    const fixture = configure(1);
+    const el = fixture.nativeElement as HTMLElement;
+    const clickReset = () => {
+      (
+        Array.from(el.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Reset credential'),
+        ) as HTMLButtonElement
+      ).dispatchEvent(new Event('click'));
+      fixture.detectChanges();
+      (
+        Array.from(el.querySelectorAll('.confirm-dialog button')).find((b) =>
+          b.textContent?.includes('Reset credential'),
+        ) as HTMLButtonElement
+      ).dispatchEvent(new Event('click'));
+      fixture.detectChanges();
+    };
+
+    // First reset: the administrator's code is issued but, per the reported
+    // recovery defect, never retained.
+    resetCredential.mockReturnValueOnce(
+      of<AdminResult<AdminInvitationResponse>>({
+        ok: true,
+        value: {
+          invitation: {
+            code: 'reset-code-first',
+            expires_at: '2026-01-02T00:00:00Z',
+            sensitive: true,
+            warning: 'w',
+          },
+        },
+      }),
+    );
+    clickReset();
+    expect(el.textContent).toContain('reset-code-first');
+
+    (
+      Array.from(el.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('I have delivered this code securely'),
+      ) as HTMLButtonElement
+    ).dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+
+    // The administrator must be able to reissue immediately, even though
+    // the account is now password_change_required — the backend defect this
+    // guards against previously rejected exactly this call with
+    // invalid_state. Only the newest code is ever shown.
+    resetCredential.mockReturnValueOnce(
+      of<AdminResult<AdminInvitationResponse>>({
+        ok: true,
+        value: {
+          invitation: {
+            code: 'reset-code-second',
+            expires_at: '2026-01-02T01:00:00Z',
+            sensitive: true,
+            warning: 'w',
+          },
+        },
+      }),
+    );
+    clickReset();
+
+    expect(resetCredential).toHaveBeenCalledTimes(2);
+    expect(el.textContent).toContain('reset-code-second');
+    expect(el.textContent).not.toContain('reset-code-first');
+    fixture.destroy();
+  });
+
+  it('surfaces invalid_state generically if the backend still rejects a reset-credential attempt', () => {
+    const fixture = configure(1);
+    resetCredential.mockReturnValue(
+      of<AdminResult<AdminInvitationResponse>>({
+        ok: false,
+        error: {
+          kind: 'invalid_state',
+          message: "This action is not permitted for the account's current state.",
+        },
+      }),
+    );
+    const el = fixture.nativeElement as HTMLElement;
+    (
+      Array.from(el.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('Reset credential'),
+      ) as HTMLButtonElement
+    ).dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+    (
+      Array.from(el.querySelectorAll('.confirm-dialog button')).find((b) =>
+        b.textContent?.includes('Reset credential'),
+      ) as HTMLButtonElement
+    ).dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+
+    expect(el.textContent).toContain("not permitted for the account's current state");
     fixture.destroy();
   });
 

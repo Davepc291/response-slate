@@ -390,6 +390,65 @@ func TestAdminResetClearsPasswordAndRevokesSessions(t *testing.T) {
 	}
 }
 
+// TestAdminResetReissuesWhenAlreadyPasswordChangeRequired covers the
+// account-recovery gap where the first reset code is lost before it is
+// used: an authorized administrator must be able to call AdminReset again
+// on a password_change_required account, which must invalidate the prior
+// pending code (only the newest one remains pending), leave the account in
+// password_change_required, and record a second admin_reset audit event
+// without ever recording a raw code.
+func TestAdminResetReissuesWhenAlreadyPasswordChangeRequired(t *testing.T) {
+	svc, store, audit := newTestService()
+	target := store.seedUser(identity.User{NormalizedEmail: "ar2@example.test", DisplayName: "AR2", Role: identity.RoleReadOnlyAuditor, Status: identity.StateActive, PasswordHash: "hash"})
+	store.seedSessions(target, 2)
+
+	first, err := svc.AdminReset(context.Background(), systemAdmin(9999), target, fixedNow)
+	if err != nil {
+		t.Fatalf("first AdminReset: unexpected error: %v", err)
+	}
+
+	// The account is now password_change_required with the first code
+	// unused; reissuing must succeed rather than return ErrInvalidTransition.
+	second, err := svc.AdminReset(context.Background(), systemAdmin(9999), target, fixedNow)
+	if err != nil {
+		t.Fatalf("reissue AdminReset from password_change_required: unexpected error: %v", err)
+	}
+	if second.RawInvitationCode == "" {
+		t.Fatal("expected a non-empty raw credential code on reissue")
+	}
+	if second.RawInvitationCode == first.RawInvitationCode {
+		t.Fatal("expected the reissued code to differ from the first one")
+	}
+
+	u, _ := store.GetByID(context.Background(), target)
+	if u.Status != identity.StatePasswordChangeRequired || u.PasswordHash != "" {
+		t.Fatalf("expected the account to remain password_change_required with no password, got %+v", u)
+	}
+	if store.activeSessionCount(target) != 0 {
+		t.Fatal("expected sessions to remain revoked after reissue")
+	}
+	// Only the newest code is pending: the first reset's code was
+	// invalidated by the reissue.
+	if n := store.pendingInvitationCount(target); n != 1 {
+		t.Fatalf("expected exactly one pending reset code after reissue, got %d", n)
+	}
+
+	events := audit.snapshot()
+	if len(events) != 2 {
+		t.Fatalf("expected two admin_reset audit events, got %+v", events)
+	}
+	for _, ev := range events {
+		if ev.Metadata["action"] != "admin_reset" {
+			t.Fatalf("expected admin_reset audit events, got %+v", events)
+		}
+		for k := range ev.Metadata {
+			if k != "action" {
+				t.Fatalf("audit metadata must never carry a raw code, got key %q", k)
+			}
+		}
+	}
+}
+
 func TestAdminResetSelfForbidden(t *testing.T) {
 	svc, store, _ := newTestService()
 	self := store.seedUser(identity.User{NormalizedEmail: "self4@example.test", DisplayName: "Self4", Role: identity.RoleSystemAdministrator, Status: identity.StateActive})

@@ -373,6 +373,80 @@ func TestLiveAdminResetReissuesInvitationAndClearsPassword(t *testing.T) {
 	}
 }
 
+// TestLiveAdminResetReissuesWhenAlreadyPasswordChangeRequired covers the
+// account-recovery gap where an administrator's first reset code is lost or
+// never retained before the recipient uses it: AdminReset must be callable
+// again on an account that is already password_change_required (not just
+// from active/suspended), it must invalidate the still-pending first code so
+// only the newest one ever redeems, and it must leave the account in
+// password_change_required throughout.
+func TestLiveAdminResetReissuesWhenAlreadyPasswordChangeRequired(t *testing.T) {
+	pool := liveTestPool(t)
+	ctx, tx, p := beginRollback(t, pool)
+	adminID := insertBootstrapAdmin(ctx, t, tx)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	rawInv, _ := invitation.GenerateToken()
+	userID, err := p.CreateUserAndInvite(ctx, NewUserParams{
+		Email: uniqueEmail(t), DisplayName: "Synthetic Lost Code", Role: identity.RoleReadOnlyAuditor, CreatedBy: adminID,
+		InvitationTokenDigest: invitation.Digest(rawInv), InvitationExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(rawInv), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.EstablishPassword(ctx, userID, hashFor(t, "synthetic-test-password-7"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 2/3: the administrator's first reset (account is active).
+	firstRaw, _ := invitation.GenerateToken()
+	if err := p.AdminReset(ctx, userID, adminID, invitation.Digest(firstRaw), now.Add(time.Hour), now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("first AdminReset: %v", err)
+	}
+	u, _ := p.GetByID(ctx, userID)
+	if u.Status != identity.StatePasswordChangeRequired {
+		t.Fatalf("expected password_change_required after the first reset, got %s", u.Status)
+	}
+
+	// While password_change_required (simulating time passing after the
+	// first reset, before the lost code is ever used), CreateSession must
+	// fail closed rather than create a session: no session exists here for
+	// the reissue below to revoke.
+	rawSession, _ := session.GenerateToken()
+	if _, err := p.CreateSession(ctx, userID, session.Digest(rawSession), "", now.Add(6*time.Minute), now.Add(time.Hour)); err != ErrAccountNotActive {
+		t.Fatalf("expected ErrAccountNotActive while password_change_required, got %v", err)
+	}
+
+	// Step 4/5: the first code was never retained; the administrator must be
+	// able to reissue without first forcing the account through any other
+	// state. Before the fix, this returned ErrInvalidTransition because the
+	// state-transition matrix had no password_change_required ->
+	// password_change_required entry, even though AdminReset's own switch
+	// and doc comment already treated it as a supported starting state.
+	secondRaw, _ := invitation.GenerateToken()
+	if err := p.AdminReset(ctx, userID, adminID, invitation.Digest(secondRaw), now.Add(2*time.Hour), now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("reissue AdminReset from password_change_required: %v", err)
+	}
+
+	u, _ = p.GetByID(ctx, userID)
+	if u.Status != identity.StatePasswordChangeRequired || u.HasPassword() {
+		t.Fatalf("expected password_change_required with no password after reissue, got %+v", u)
+	}
+
+	// The old (first) code must be invalidated by the reissue: it must never
+	// redeem, even though it had not expired.
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(firstRaw), now.Add(15*time.Minute)); err != ErrTokenInvalid {
+		t.Fatalf("expected the superseded first reset code to be rejected, got %v", err)
+	}
+	// The newest code must redeem successfully.
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(secondRaw), now.Add(15*time.Minute)); err != nil {
+		t.Fatalf("expected the newest reset code to redeem, got %v", err)
+	}
+}
+
 func TestLiveSessionLifecycleOperations(t *testing.T) {
 	pool := liveTestPool(t)
 	ctx, tx, p := beginRollback(t, pool)

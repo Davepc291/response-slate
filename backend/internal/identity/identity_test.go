@@ -93,6 +93,11 @@ func TestAllowedTransitionMatrix(t *testing.T) {
 		{StateExpired, StateInvited},
 		{StateActive, StateSuspended},
 		{StateActive, StateDisabled},
+		// An administrator must be able to reissue a fresh credential-reset
+		// code for an account that is already password_change_required (for
+		// example, the original code was lost or never retained) without
+		// first forcing it through some other state.
+		{StatePasswordChangeRequired, StatePasswordChangeRequired},
 	}
 	for _, c := range allowed {
 		if !AllowedTransition(c.from, c.to) {

@@ -131,10 +131,11 @@ var allowedTransitions = map[AccountState]map[AccountState]bool{
 		StateDisabled:               true, // administrator action
 	},
 	StatePasswordChangeRequired: {
-		StateActive:    true, // permanent password (and required MFA) established
-		StateExpired:   true, // automatic timeout before completion
-		StateSuspended: true, // administrator action
-		StateDisabled:  true, // administrator action
+		StateActive:                 true, // permanent password (and required MFA) established
+		StateExpired:                true, // automatic timeout before completion
+		StateSuspended:              true, // administrator action
+		StateDisabled:               true, // administrator action
+		StatePasswordChangeRequired: true, // administrator-initiated reissue of a lost/unused reset code
 	},
 	StateActive: {
 		StateSuspended:              true, // administrator action
