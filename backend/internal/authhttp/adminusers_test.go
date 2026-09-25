@@ -64,8 +64,8 @@ func TestAdminUsersDenyNonAdministrator(t *testing.T) {
 
 func TestAdminCreateUserRequiresCSRF(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("admin@example.test")
+	id := hn.seedActiveUser("admin@example.test", identity.RoleSystemAdministrator)
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin@example.test")
 
 	body := []byte(`{"email":"new@example.test","display_name":"New","role":"responder","scope":"engine-1"}`)
 	rec := hn.request(http.MethodPost, "/api/admin/users", body, reqOpts{
@@ -79,8 +79,8 @@ func TestAdminCreateUserRequiresCSRF(t *testing.T) {
 
 func TestAdminCreateUserSuccessReturnsCodeOnceOnly(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin2@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("admin2@example.test")
+	id := hn.seedActiveUser("admin2@example.test", identity.RoleSystemAdministrator)
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin2@example.test")
 
 	body := []byte(`{"email":"new2@example.test","display_name":"New Two","role":"responder","scope":"engine-1"}`)
 	rec := hn.request(http.MethodPost, "/api/admin/users", body, hn.authedOpts(sessionCookie, csrfCookie))
@@ -114,9 +114,9 @@ func TestAdminCreateUserSuccessReturnsCodeOnceOnly(t *testing.T) {
 
 func TestAdminCreateUserDuplicateEmailConflict(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin3@example.test", identity.RoleSystemAdministrator)
+	id := hn.seedActiveUser("admin3@example.test", identity.RoleSystemAdministrator)
 	hn.seedUserWithScope("dup@example.test", identity.RoleResponder, "engine-1", identity.StateActive)
-	sessionCookie, csrfCookie := hn.loginCookies("admin3@example.test")
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin3@example.test")
 
 	body := []byte(`{"email":"dup@example.test","display_name":"Dup","role":"responder","scope":"engine-1"}`)
 	rec := hn.request(http.MethodPost, "/api/admin/users", body, hn.authedOpts(sessionCookie, csrfCookie))
@@ -127,9 +127,9 @@ func TestAdminCreateUserDuplicateEmailConflict(t *testing.T) {
 
 func TestAdminGetUserOutOfScopeIsNotFound(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedUserWithScope("deptadmin@example.test", identity.RoleDepartmentAdministrator, "engine-1", identity.StateActive)
+	deptAdmin := hn.seedUserWithScope("deptadmin@example.test", identity.RoleDepartmentAdministrator, "engine-1", identity.StateActive)
 	other := hn.seedUserWithScope("other@example.test", identity.RoleResponder, "engine-2", identity.StateActive)
-	sessionCookie, csrfCookie := hn.loginCookies("deptadmin@example.test")
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(deptAdmin, "deptadmin@example.test")
 
 	rec := hn.request(http.MethodGet, "/api/admin/users/"+userIDStr(int64(other)), nil, hn.authedOpts(sessionCookie, csrfCookie))
 	if rec.Code != http.StatusNotFound {
@@ -140,7 +140,7 @@ func TestAdminGetUserOutOfScopeIsNotFound(t *testing.T) {
 func TestAdminSuspendSelfForbidden(t *testing.T) {
 	hn := newHarness(t)
 	self := hn.seedActiveUser("self@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("self@example.test")
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(self, "self@example.test")
 
 	rec := hn.request(http.MethodPost, "/api/admin/users/"+userIDStr(int64(self))+"/suspend", []byte(`{}`), hn.authedOpts(sessionCookie, csrfCookie))
 	if rec.Code != http.StatusForbidden {
@@ -150,9 +150,9 @@ func TestAdminSuspendSelfForbidden(t *testing.T) {
 
 func TestAdminSuspendAndRestore(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin4@example.test", identity.RoleSystemAdministrator)
+	id := hn.seedActiveUser("admin4@example.test", identity.RoleSystemAdministrator)
 	target := hn.seedUserWithScope("target@example.test", identity.RoleResponder, "engine-1", identity.StateActive)
-	sessionCookie, csrfCookie := hn.loginCookies("admin4@example.test")
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin4@example.test")
 
 	rec := hn.request(http.MethodPost, "/api/admin/users/"+userIDStr(int64(target))+"/suspend", nil, hn.authedOpts(sessionCookie, csrfCookie))
 	if rec.Code != http.StatusOK {
@@ -167,8 +167,8 @@ func TestAdminSuspendAndRestore(t *testing.T) {
 
 func TestAdminListUsersBoundsInvalidLimit(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin5@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("admin5@example.test")
+	id := hn.seedActiveUser("admin5@example.test", identity.RoleSystemAdministrator)
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin5@example.test")
 
 	rec := hn.request(http.MethodGet, "/api/admin/users?limit=-1", nil, hn.authedOpts(sessionCookie, csrfCookie))
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -178,8 +178,8 @@ func TestAdminListUsersBoundsInvalidLimit(t *testing.T) {
 
 func TestAdminUsersRejectUnknownFields(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin6@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("admin6@example.test")
+	id := hn.seedActiveUser("admin6@example.test", identity.RoleSystemAdministrator)
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin6@example.test")
 
 	body := []byte(`{"email":"x@example.test","display_name":"X","role":"responder","scope":"engine-1","unexpected_field":true}`)
 	rec := hn.request(http.MethodPost, "/api/admin/users", body, hn.authedOpts(sessionCookie, csrfCookie))
@@ -190,8 +190,8 @@ func TestAdminUsersRejectUnknownFields(t *testing.T) {
 
 func TestAdminUsersWrongContentType(t *testing.T) {
 	hn := newHarness(t)
-	hn.seedActiveUser("admin7@example.test", identity.RoleSystemAdministrator)
-	sessionCookie, csrfCookie := hn.loginCookies("admin7@example.test")
+	id := hn.seedActiveUser("admin7@example.test", identity.RoleSystemAdministrator)
+	sessionCookie, csrfCookie := hn.loginAndVerifyMFACookies(id, "admin7@example.test")
 
 	rec := hn.request(http.MethodPost, "/api/admin/users", []byte(`{}`), reqOpts{
 		cookies:     []*http.Cookie{sessionCookie, csrfCookie},

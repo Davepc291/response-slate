@@ -108,6 +108,15 @@ type Principal struct {
 	Email       string
 	DisplayName string
 	Status      identity.AccountState
+	// MFAVerified reports whether the CURRENT session (SessionID) has
+	// completed a WebAuthn authentication ceremony (Step 9F-4, AAX-07). It
+	// is never derived from whether the account has an enrolled
+	// credential — that is a separate, account-level fact — only from this
+	// specific session's own sessions.mfa_verified_at column. Always false
+	// for a principal resolved via the Step 9F-3 MFA-enrollment bridging
+	// credential (SessionID 0): that credential authorizes nothing beyond
+	// the enrollment route to begin with.
+	MFAVerified bool
 }
 
 type contextKey int
@@ -216,4 +225,19 @@ func (h *Handlers) setSessionCookies(w http.ResponseWriter, rawToken string, exp
 func (h *Handlers) clearSessionCookies(w http.ResponseWriter) {
 	http.SetCookie(w, authcookie.ClearSessionCookie())
 	http.SetCookie(w, authcookie.ClearCSRFCookie())
+}
+
+// setMFAEnrollCookies issues the Step 9F-3 bridging credential cookie
+// (never the normal session cookie — see requireSessionOrMFAEnrollment)
+// alongside its own CSRF cookie, derived exactly like a normal session's.
+func (h *Handlers) setMFAEnrollCookies(w http.ResponseWriter, rawToken string, expiresAt time.Time) {
+	http.SetCookie(w, authcookie.NewMFAEnrollCookie(rawToken, expiresAt))
+	digest := session.Digest(rawToken)
+	http.SetCookie(w, authcookie.NewCSRFCookie(h.csrf.Derive(digest), expiresAt))
+}
+
+// clearMFAEnrollCookie expires the bridging credential cookie. Safe to send
+// even when the client never had one set.
+func (h *Handlers) clearMFAEnrollCookie(w http.ResponseWriter) {
+	http.SetCookie(w, authcookie.ClearMFAEnrollCookie())
 }

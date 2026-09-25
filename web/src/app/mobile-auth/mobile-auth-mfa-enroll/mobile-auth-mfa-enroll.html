@@ -1,0 +1,38 @@
+<section class="auth-screen" aria-labelledby="auth-mfa-enroll-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="auth-mfa-enroll-title" tabindex="-1">Set up a passkey</h1>
+  <p class="auth-lede">
+    Administrator accounts require a passkey before they can sign in. Set up a passkey on this
+    device to continue.
+  </p>
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @if (errorMessage()) {
+      <p class="auth-error" id="auth-mfa-enroll-error">{{ errorMessage() }}</p>
+    }
+    @if (phase() === 'awaiting-device') {
+      <p class="auth-info">Follow your device's prompt to finish setting up your passkey.</p>
+    }
+  </div>
+
+  @if (!supported()) {
+    <p class="auth-error">
+      Passkeys are not supported in this browser or on this device. Try a current version of
+      Chrome, Edge, Safari, or Firefox, or contact your administrator.
+    </p>
+  } @else {
+    <button
+      type="button"
+      class="primary"
+      [disabled]="busy()"
+      [attr.aria-describedby]="errorMessage() ? 'auth-mfa-enroll-error' : null"
+      (click)="startEnrollment()"
+    >
+      {{ buttonLabel() }}
+    </button>
+  }
+
+  <div class="auth-links">
+    <a routerLink="/mobile/auth/sign-in">Back to sign in</a>
+  </div>
+</section>

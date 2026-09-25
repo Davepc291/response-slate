@@ -74,7 +74,17 @@ export class MobileAuthSessions {
       return;
     }
     this.signingOut.set(true);
-    this.api.logout().subscribe(() => {
+    this.errorMessage.set(null);
+    this.api.logout().subscribe((result) => {
+      this.signingOut.set(false);
+      if (!result.ok) {
+        // Never treat a failed logout call as a successful sign-out: the
+        // server-side session may still be fully valid and authorized, so
+        // clearing local state and navigating away here would tell the
+        // user they are signed out when they are not.
+        this.errorMessage.set('Unable to log out right now. Try again.');
+        return;
+      }
       this.session.clear();
       void this.router.navigateByUrl('/mobile/auth/sign-in');
     });
@@ -85,7 +95,13 @@ export class MobileAuthSessions {
       return;
     }
     this.signingOut.set(true);
-    this.api.logoutAll().subscribe(() => {
+    this.errorMessage.set(null);
+    this.api.logoutAll().subscribe((result) => {
+      this.signingOut.set(false);
+      if (!result.ok) {
+        this.errorMessage.set('Unable to log out right now. Try again.');
+        return;
+      }
       this.session.clear();
       void this.router.navigateByUrl('/mobile/auth/sign-in');
     });

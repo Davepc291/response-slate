@@ -80,11 +80,21 @@ export class MobileAuthFirstTimeAccess {
         return;
       }
 
+      if (result.value.status === 'password_change_required') {
+        // Step 9F-5: the account left password_change_required only
+        // because it still needs MFA enrollment (see
+        // RedeemInvitationAndSetPassword's own doc comment on the backend —
+        // that is the only reason this status can still hold here). The
+        // backend already issued the narrow MFA-enrollment bridging cookie
+        // alongside this response; establishing a password alone is never
+        // treated as activation.
+        void this.router.navigateByUrl('/mobile/auth/mfa/enroll');
+        return;
+      }
       if (result.value.status !== 'active') {
-        // The account still requires further verification (for example, an
-        // administrator role requiring MFA enrollment this preview does not
-        // implement). Show a safe generic state; never bypass or fabricate
-        // an MFA flow.
+        // Defensive fallback only: RedeemInvitationAndSetPassword never
+        // actually returns any other status. Show a safe generic state
+        // rather than navigating blindly into an unrecognized one.
         this.verificationNeeded.set(true);
         return;
       }

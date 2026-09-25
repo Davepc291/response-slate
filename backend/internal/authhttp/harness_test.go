@@ -2,16 +2,20 @@ package authhttp
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"greenwich-fire-responder/backend/internal/adminservice"
 	"greenwich-fire-responder/backend/internal/authconfig"
 	"greenwich-fire-responder/backend/internal/authcookie"
 	"greenwich-fire-responder/backend/internal/identity"
 	"greenwich-fire-responder/backend/internal/identityservice"
+	"greenwich-fire-responder/backend/internal/mfa"
 	"greenwich-fire-responder/backend/internal/passwordpolicy"
 	"greenwich-fire-responder/backend/internal/session"
 )
@@ -66,6 +70,7 @@ func newHarness(t *testing.T) *harness {
 	store := newFakeStore()
 	audit := &fakeAudit{}
 	svc := identityservice.New(store, audit, testServiceConfig(), nil)
+	svc.SetMFAProvider(&fakeMFAProvider{})
 	handlers, err := New(svc, testAuthOptions(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +180,59 @@ func (hn *harness) loginCookies(email string) (sessionCookie, csrfCookie *http.C
 		hn.t.Fatal("expected both session and csrf cookies to be set")
 	}
 	return
+}
+
+// enrollSyntheticMFACredential seeds a non-revoked, synthetic passkey
+// credential directly in the fake store for userID, bypassing the
+// enrollment ceremony itself (already exercised end-to-end by
+// TestMFAEnroll*): tests that need Step 9F-4 session verification only
+// need SOME enrolled credential to exist first, since BeginMFALogin
+// refuses to begin a ceremony for an account with none.
+func (hn *harness) enrollSyntheticMFACredential(userID identity.UserID) {
+	hn.t.Helper()
+	credData, err := mfa.MarshalCredential(&webauthn.Credential{
+		ID:        []byte(fmt.Sprintf("harness-credential-%d", userID)),
+		PublicKey: []byte("harness-public-key"),
+	})
+	if err != nil {
+		hn.t.Fatal(err)
+	}
+	hn.store.mu.Lock()
+	hn.store.mfaCreds[userID] = append(hn.store.mfaCreds[userID], &fakeMFACredential{
+		credentialType: "passkey", credentialData: credData,
+	})
+	hn.store.mu.Unlock()
+}
+
+// verifyMFAOverHTTP drives the full WebAuthn login-verification ceremony
+// (POST /api/auth/mfa/verify, begin then finish) against the session named
+// by sessionCookie/csrfCookie, upgrading exactly that session to
+// MFA-verified. The account must already have an enrolled credential (see
+// enrollSyntheticMFACredential).
+func (hn *harness) verifyMFAOverHTTP(sessionCookie, csrfCookie *http.Cookie) {
+	hn.t.Helper()
+	opts := hn.authedOpts(sessionCookie, csrfCookie)
+	if rec := hn.request(http.MethodPost, "/api/auth/mfa/verify", []byte(`{"action":"begin"}`), opts); rec.Code != http.StatusOK {
+		hn.t.Fatalf("mfa verify begin failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := hn.request(http.MethodPost, "/api/auth/mfa/verify", []byte(`{"action":"finish","credential":"`+validMFAResponseMarker+`"}`), opts)
+	if rec.Code != http.StatusOK {
+		hn.t.Fatalf("mfa verify finish failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// loginAndVerifyMFACookies logs in over HTTP, seeds a synthetic enrolled
+// credential for userID if it does not already have a usable one, and
+// completes the WebAuthn verification ceremony for the resulting session —
+// the one path every admin-route test that expects success must use
+// instead of the plain loginCookies, since Step 9F-4 requires an
+// MFA-verified current session for an administrator caller.
+func (hn *harness) loginAndVerifyMFACookies(userID identity.UserID, email string) (sessionCookie, csrfCookie *http.Cookie) {
+	hn.t.Helper()
+	sessionCookie, csrfCookie = hn.loginCookies(email)
+	hn.enrollSyntheticMFACredential(userID)
+	hn.verifyMFAOverHTTP(sessionCookie, csrfCookie)
+	return sessionCookie, csrfCookie
 }
 
 func (hn *harness) authedOpts(sessionCookie, csrfCookie *http.Cookie) reqOpts {

@@ -38,6 +38,17 @@ func (s *Service) checkNewPassword(ctx context.Context, password string) error {
 type RedeemResult struct {
 	UserID identity.UserID
 	Status identity.AccountState
+	// MFAEnrollmentToken and MFAEnrollmentExpiresAt are set only when
+	// Status is still password_change_required immediately after this
+	// call: EstablishPassword's own gate guarantees the only reason for
+	// that is a pending MFA requirement (Section 5), so the HTTP layer
+	// bridges the caller into Begin/FinishMFAEnrollment with this
+	// short-lived credential instead of the normal session cookie (see
+	// mfa.go's package doc comment for why no session can exist yet).
+	// Empty when Status is anything else, or if issuance failed (a
+	// non-fatal, at-capacity condition — see issueMFAEnrollmentCredential).
+	MFAEnrollmentToken     string
+	MFAEnrollmentExpiresAt time.Time
 }
 
 // RedeemInvitationAndSetPassword completes Section 2's first-time-login
@@ -90,8 +101,16 @@ func (s *Service) RedeemInvitationAndSetPassword(ctx context.Context, rawToken, 
 		return RedeemResult{}, ErrInternal
 	}
 
+	result := RedeemResult{UserID: userID, Status: newStatus}
+	if newStatus == identity.StatePasswordChangeRequired {
+		if token, expiresAt, credErr := s.issueMFAEnrollmentCredential(userID, now); credErr == nil {
+			result.MFAEnrollmentToken = token
+			result.MFAEnrollmentExpiresAt = expiresAt
+		}
+	}
+
 	s.recordAudit(ctx, identityaudit.InvitationRedeemed, userID, 0, "", nil, now)
-	return RedeemResult{UserID: userID, Status: newStatus}, nil
+	return result, nil
 }
 
 // RequestPasswordReset issues a single-use password-reset token for email

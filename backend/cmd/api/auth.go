@@ -14,6 +14,7 @@ import (
 	"greenwich-fire-responder/backend/internal/identityauditstore"
 	"greenwich-fire-responder/backend/internal/identityservice"
 	"greenwich-fire-responder/backend/internal/identitystore"
+	"greenwich-fire-responder/backend/internal/mfa"
 	"greenwich-fire-responder/backend/internal/passwordpolicy"
 	"greenwich-fire-responder/backend/internal/session"
 )
@@ -82,6 +83,30 @@ func buildAuthHandlers(ctx context.Context, cfg config.Config, logger *slog.Logg
 	if err != nil {
 		pool.Close()
 		return nil, nil, err
+	}
+
+	// Step 9F-6: the WebAuthn passkey provider is constructed, and wired
+	// into svc, only when GFR_AUTH_MFA_RP_ID (and its required companion,
+	// GFR_AUTH_MFA_RP_DISPLAY_NAME) is set — authconfig.Options.Validate
+	// already rejects one being set without the other, so both are known
+	// non-empty here whenever MFARPID is. Every deployment that has not set
+	// these keeps identityservice.Service.SetMFAProvider entirely uncalled,
+	// leaving /api/auth/mfa/* exactly as functionally inert (503) as it was
+	// before this step (see mfa.go's own doc comment). RPOrigins reuses the
+	// exact same AllowedOrigins already validated for the CSRF Origin
+	// check, rather than a second, independently-configured origin list —
+	// see authconfig.Options.MFARPID's doc comment for why.
+	if cfg.Auth.MFARPID != "" {
+		provider, err := mfa.NewProvider(mfa.Config{
+			RPID:          cfg.Auth.MFARPID,
+			RPDisplayName: cfg.Auth.MFARPDisplayName,
+			RPOrigins:     cfg.Auth.AllowedOrigins,
+		})
+		if err != nil {
+			pool.Close()
+			return nil, nil, err
+		}
+		svc.SetMFAProvider(provider)
 	}
 
 	// Step 9E: the administrator user-management API is wired up under the

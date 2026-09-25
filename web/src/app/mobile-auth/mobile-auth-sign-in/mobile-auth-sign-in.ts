@@ -10,10 +10,10 @@ import { inputValue } from '../auth-data/input-value';
  * Real sign-in screen at /mobile/auth/sign-in (Step 9D requirement 4). It
  * submits only to POST /api/auth/login, never fabricates a successful
  * login, and always verifies GET /api/auth/me before treating the session
- * as established. Because production activation is not authorized until
- * Step 9F, a successful sign-in navigates only to the explicit
- * /mobile/auth/sessions preview screen, never into protected production
- * routing.
+ * as established. Step 9F-7 activates production routing: a successful
+ * sign-in now navigates into the protected mobile area at /mobile/home
+ * (the same route app.routes.ts's guarded '/' redirects an already
+ * authenticated visitor to), not the /mobile/auth/sessions preview screen.
  */
 @Component({
   selector: 'app-mobile-auth-sign-in',
@@ -78,7 +78,7 @@ export class MobileAuthSignIn {
           return;
         }
         this.session.setAuthenticated(meResult.value);
-        void this.router.navigateByUrl('/mobile/auth/sessions');
+        void this.router.navigateByUrl('/mobile/home');
       });
     });
   }

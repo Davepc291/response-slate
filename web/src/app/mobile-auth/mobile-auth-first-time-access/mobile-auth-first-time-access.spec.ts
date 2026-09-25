@@ -105,7 +105,7 @@ describe('MobileAuthFirstTimeAccess', () => {
     fixture.destroy();
   });
 
-  it('shows a safe additional-verification message rather than bypassing or fabricating MFA', () => {
+  it('routes an MFA-required administrator (still password_change_required) to MFA enrollment, never treating password establishment alone as activation', () => {
     const fixture = configure();
     firstTimeLogin.mockReturnValue(
       of<AuthResult<StatusResponse>>({ ok: true, value: { status: 'password_change_required' } }),
@@ -115,9 +115,25 @@ describe('MobileAuthFirstTimeAccess', () => {
     setValue(fixture, '#auth-fta-confirm', 'a long passphrase here');
     submit(fixture);
 
+    expect(navigateByUrl).toHaveBeenCalledExactlyOnceWith('/mobile/auth/mfa/enroll');
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).not.toContain('Your password has been set.');
+    fixture.destroy();
+  });
+
+  it('falls back to the safe generic message, without navigating, for an unrecognized status', () => {
+    const fixture = configure();
+    firstTimeLogin.mockReturnValue(
+      of<AuthResult<StatusResponse>>({ ok: true, value: { status: 'invited' } }),
+    );
+    setValue(fixture, '#auth-fta-code', 'invite-code');
+    setValue(fixture, '#auth-fta-password', 'a long passphrase here');
+    setValue(fixture, '#auth-fta-confirm', 'a long passphrase here');
+    submit(fixture);
+
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('Additional verification is required');
-    expect(el.textContent).not.toMatch(/enroll|scan this code|authenticator app/i);
+    expect(navigateByUrl).not.toHaveBeenCalled();
     fixture.destroy();
   });
 

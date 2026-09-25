@@ -1,5 +1,54 @@
 # Local development database
 
+## Migration 000009: MFA-verified current sessions (Step 9F-4)
+
+Apply once after `000008` to the existing local development PostgreSQL service.
+Migrations 000001-000008 remain unchanged. This migration adds exactly one
+nullable column and extends one existing `CHECK` constraint; it creates no new
+table and seeds nothing.
+
+An enrolled `mfa_credentials` row proves an account *can* complete MFA; it has
+never proven that the *current session* did. `sessions.mfa_verified_at`
+(`timestamptz`, nullable) records whether THIS specific session completed a
+WebAuthn authentication ceremony, distinct from account-level enrollment.
+`NULL` is the default for every existing row (added automatically by the
+`ALTER TABLE`) and every newly created row, so a pre-existing/legacy session
+is always treated as not MFA-verified — there is no backfill step and none is
+needed. Application code must treat `NULL` as fail-closed, never as
+"verification not required." This migration does not touch `mfa_credentials`,
+`sessions.revoked_at`/`expires_at`, or any existing session-lifecycle
+behavior: a revoked or expired session is already unresolvable before this
+column is ever consulted, so MFA verification "expires" automatically with
+the session, with no separate expiry bookkeeping.
+
+`identity_audit_log.event_type`'s `CHECK` constraint is extended with
+`mfa_verification`, a new event type distinct from the existing
+`mfa_enrollment` (registering a new credential): recording a per-session
+verification ceremony separately from enrollment keeps the two different
+security events from being conflated in the audit trail. The constraint is
+dropped and recreated under its original name
+(`identity_audit_log_event_type_check`) with the fuller value list; every
+previously valid `event_type` value remains valid.
+
+```powershell
+Get-Content -Raw database/migrations/000009_mfa_session_verification.sql |
+    docker compose --env-file .env exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+if ($LASTEXITCODE -ne 0) { throw 'Migration 000009 failed.' }
+```
+
+Check `schema_migrations` before applying: rerunning this migration fails and
+rolls back; the API and CLI never auto-migrate. This repository has no
+separate down-migration file for any existing version — reverting means
+writing and applying a new, explicitly reviewed superseding migration, never
+editing history in place. No SQL schema-test suite accompanies this migration;
+its behavior is covered by Go-level tests instead
+(`backend/internal/identitystore`'s `TestLiveSessionMFAVerification`, gated
+behind the existing `GFR_IDENTITY_LIVE_TEST` opt-in, plus unit tests in
+`backend/internal/identityservice` and `backend/internal/authhttp` that do not
+require a live database). No HTTP route, cookie, or WebAuthn provider
+configuration is activated in production by this migration alone — see
+Step 9F-4's own implementation report for what remains.
+
 ## Migration 000008: identity/authorization foundation (Step 9B)
 
 Apply once after `000007` to the existing local development PostgreSQL service.

@@ -1,0 +1,56 @@
+# Production Caddyfile template for Greenwich Fire Responder — Step 9F-7D.
+#
+# Review this file before it is ever used by Install-Caddy.ps1 / Run-Caddy.ps1.
+# Not activated by writing this file: Caddy itself is not installed, DNS for
+# app.gfrapp.com is not yet pointed at this host, and 80/443 are not yet
+# forwarded to it. Automatic HTTPS below will not succeed until all three
+# are true.
+#
+# {$GFR_FRONTEND_ROOT} is set by Run-Caddy.ps1 from the validated runtime
+# configuration; do not hardcode a path here.
+
+app.gfrapp.com {
+	encode gzip
+
+	# Access log for authentication troubleshooting (9F-7J preflight).
+	# Caddy's default JSON encoder includes the full request/response header
+	# maps verbatim, so the filter encoder below deletes the specific fields
+	# that would otherwise leak the session cookie, CSRF header, or any
+	# Authorization header before a line is ever written to disk. No request
+	# body is ever logged by Caddy unless a module explicitly adds one, and
+	# none does here.
+	log {
+		output file C:\Users\User\AppData\Local\GreenwichFireResponder\Caddy\logs\access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+				request>headers>X-Csrf-Token delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+
+	# The Go API is reachable ONLY on loopback; nothing public reaches it
+	# except through this reverse proxy.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		root * {$GFR_FRONTEND_ROOT}
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

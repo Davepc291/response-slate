@@ -34,6 +34,13 @@ type fakeReset struct {
 
 type fakeSession struct{ session.Session }
 
+type fakeMFACredential struct {
+	credentialType string
+	credentialData []byte
+	label          string
+	revoked        bool
+}
+
 type fakeStore struct {
 	mu sync.Mutex
 
@@ -43,6 +50,7 @@ type fakeStore struct {
 	invitations   map[string]*fakeInvitation
 	resets        map[string]*fakeReset
 	sessions      map[session.ID]*fakeSession
+	mfaCreds      map[identity.UserID][]*fakeMFACredential
 }
 
 func newFakeStore() *fakeStore {
@@ -51,6 +59,7 @@ func newFakeStore() *fakeStore {
 		invitations: make(map[string]*fakeInvitation),
 		resets:      make(map[string]*fakeReset),
 		sessions:    make(map[session.ID]*fakeSession),
+		mfaCreds:    make(map[identity.UserID][]*fakeMFACredential),
 	}
 }
 
@@ -159,6 +168,18 @@ func (f *fakeStore) ResolveSession(_ context.Context, tokenDigest []byte, cfg se
 		return identitystore.Authorized{Session: s.Session, Account: u.Public(), Role: u.Role, Scope: u.Scope}, nil
 	}
 	return identitystore.Authorized{}, identitystore.ErrTokenInvalid
+}
+
+func (f *fakeStore) MarkSessionMFAVerified(_ context.Context, id session.ID, now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[id]
+	if !ok || s.RevokedAt != nil {
+		return nil
+	}
+	t := now
+	s.MFAVerifiedAt = &t
+	return nil
 }
 
 func (f *fakeStore) TouchSession(_ context.Context, id session.ID, now time.Time) error {
@@ -278,6 +299,48 @@ func (f *fakeStore) CompletePasswordReset(_ context.Context, rawTokenDigest []by
 		}
 	}
 	return r.userID, nil
+}
+
+func (f *fakeStore) EnrollMFACredential(_ context.Context, userID identity.UserID, credentialType string, credentialData []byte, label string) (identity.AccountState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if userID == 0 || credentialType != "passkey" || len(credentialData) == 0 {
+		return "", identitystore.ErrInput
+	}
+	u, ok := f.users[userID]
+	if !ok {
+		return "", identitystore.ErrInvalidTransition
+	}
+	if u.Status != identity.StatePasswordChangeRequired && u.Status != identity.StateActive {
+		return "", identitystore.ErrInvalidTransition
+	}
+	for _, c := range f.mfaCreds[userID] {
+		if !c.revoked && c.credentialType == credentialType && string(c.credentialData) == string(credentialData) {
+			return "", identitystore.ErrConflict
+		}
+	}
+	f.mfaCreds[userID] = append(f.mfaCreds[userID], &fakeMFACredential{
+		credentialType: credentialType, credentialData: credentialData, label: label,
+	})
+	if u.Status == identity.StatePasswordChangeRequired && u.Role.RequiresMFA() {
+		u.Status = identity.StateActive
+	}
+	return u.Status, nil
+}
+
+func (f *fakeStore) ListMFACredentials(_ context.Context, userID identity.UserID) ([]identitystore.MFACredential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []identitystore.MFACredential
+	for i, c := range f.mfaCreds[userID] {
+		if c.revoked {
+			continue
+		}
+		out = append(out, identitystore.MFACredential{
+			ID: int64(i + 1), CredentialType: c.credentialType, CredentialData: c.credentialData, Label: c.label,
+		})
+	}
+	return out, nil
 }
 
 type fakeAudit struct {

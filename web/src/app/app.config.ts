@@ -4,16 +4,18 @@ import { provideRouter } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
 import { routes } from './app.routes';
 import { csrfInterceptor } from './mobile-auth/auth-data/csrf.interceptor';
+import { mfaRequiredInterceptor } from './mobile-auth/auth-data/mfa-required.interceptor';
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideRouter(routes),
-    // Used only by the Step 9D /mobile/auth/** authentication client
-    // (mobile-auth/auth-data/auth-api.service.ts). No other application code
+    // Used only by the Step 9D/9F /mobile/auth/** authentication client
+    // (mobile-auth/auth-data/auth-api.service.ts,
+    // mobile-auth/auth-data/admin-api.service.ts). No other application code
     // issues HTTP requests; the synthetic board/mobile preview remains a
     // pure static/fixture surface.
-    provideHttpClient(withInterceptors([csrfInterceptor])),
+    provideHttpClient(withInterceptors([csrfInterceptor, mfaRequiredInterceptor])),
     provideServiceWorker('ngsw-worker.js', {
       enabled: !isDevMode(),
       registrationStrategy: 'registerWhenStable:30000',

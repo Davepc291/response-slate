@@ -97,6 +97,26 @@ type Options struct {
 	// validation rather than silently claiming a security control that
 	// does not exist.
 	BreachCheckEnabled bool
+
+	// MFARPID and MFARPDisplayName configure the Step 9F WebAuthn passkey
+	// provider (internal/mfa.Config) — the Relying Party's effective domain
+	// and human-readable name. Both empty (the default) means MFA stays
+	// exactly as unwired as it has always been: cmd/api never constructs an
+	// internal/mfa.Provider or calls identityservice.Service.SetMFAProvider,
+	// so /api/auth/mfa/* keeps failing closed with its existing 503, and no
+	// existing deployment that has not set these is affected in any way.
+	// Sourced from GFR_AUTH_MFA_RP_ID / GFR_AUTH_MFA_RP_DISPLAY_NAME — new
+	// variable names, not the single reserved-but-unresolved
+	// GFR_AUTH_MFA_PROVIDER name docs/authentication-authorization-v1.md
+	// Section 11.5 lists; chosen only to fit this package's existing
+	// GFR_AUTH_* convention for local validation, not a production
+	// relying-party decision. RPOrigins is deliberately not a separate
+	// field: internal/mfa.Config.RPOrigins reuses AllowedOrigins above,
+	// since a WebAuthn ceremony can only ever be legitimately signed over
+	// an origin this deployment already allowlists for the identical CSRF
+	// Origin check.
+	MFARPID          string
+	MFARPDisplayName string
 }
 
 var (
@@ -105,6 +125,7 @@ var (
 	ErrInvalidInvitationTTL   = errors.New("authconfig: invitation TTL must be positive")
 	ErrInvalidOrigins         = errors.New("authconfig: at least one allowed origin (scheme://host[:port], no path) is required")
 	ErrBreachCheckUnavailable = errors.New("authconfig: breach-password checking is enabled but no provider is implemented (Step 9B ships only a no-op checker); leave it disabled")
+	ErrInvalidMFAConfig       = errors.New("authconfig: MFA RP id and RP display name must both be set, or both left empty")
 )
 
 // Validate enforces every explicit-configuration requirement. It is a
@@ -143,6 +164,9 @@ func (o Options) Validate() error {
 	}
 	if o.BreachCheckEnabled {
 		return ErrBreachCheckUnavailable
+	}
+	if (o.MFARPID == "") != (o.MFARPDisplayName == "") {
+		return ErrInvalidMFAConfig
 	}
 	return nil
 }

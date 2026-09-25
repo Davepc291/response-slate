@@ -174,7 +174,7 @@ describe('MobileAuthSignIn', () => {
     fixture.destroy();
   });
 
-  it('verifies /api/auth/me before treating the session as established, then navigates to the preview sessions screen', () => {
+  it('verifies /api/auth/me before treating the session as established, then navigates into the protected mobile area', () => {
     const fixture = configure();
     login.mockReturnValue(of<AuthResult<MeResponse>>({ ok: true, value: ACCOUNT }));
     me.mockReturnValue(of<AuthResult<MeResponse>>({ ok: true, value: ACCOUNT }));
@@ -183,7 +183,7 @@ describe('MobileAuthSignIn', () => {
 
     expect(me).toHaveBeenCalledOnce();
     expect(setAuthenticated).toHaveBeenCalledExactlyOnceWith(ACCOUNT);
-    expect(navigateByUrl).toHaveBeenCalledExactlyOnceWith('/mobile/auth/sessions');
+    expect(navigateByUrl).toHaveBeenCalledExactlyOnceWith('/mobile/home');
     fixture.destroy();
   });
 

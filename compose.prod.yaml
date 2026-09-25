@@ -1,0 +1,33 @@
+name: greenwich-fire-responder-prod
+
+# Separate production PostgreSQL, Step 9F-7D. Deliberately independent from
+# compose.yaml's dev database: its own Compose project name, its own volume,
+# its own port (default 5442, never the dev instance's 5432), and its own
+# credentials. `docker compose -f compose.prod.yaml ...` never touches the
+# dev containers/volumes/networks created from compose.yaml.
+#
+# Not started by this change. Bring it up explicitly, later, with a real
+# env file:
+#   docker compose -f compose.prod.yaml --env-file <local-prod-env-file> up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_PROD_DB:?Set POSTGRES_PROD_DB in your environment or env file}
+      POSTGRES_USER: ${POSTGRES_PROD_USER:?Set POSTGRES_PROD_USER in your environment or env file}
+      POSTGRES_PASSWORD: ${POSTGRES_PROD_PASSWORD:?Set a non-empty POSTGRES_PROD_PASSWORD in your environment or env file}
+    ports:
+      - "127.0.0.1:${POSTGRES_PROD_PORT:-5442}:5432"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_prod_data:

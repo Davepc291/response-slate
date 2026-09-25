@@ -1,7 +1,8 @@
-# Local environment and secrets; keep the safe template tracked.
+# Local environment and secrets; keep the safe templates tracked.
 .env
 .env.*
 !.env.example
+!.env.production.example
 secrets/
 .secrets/
 *.secret

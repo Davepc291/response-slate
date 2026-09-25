@@ -81,3 +81,35 @@ func TestValidateRejectsBreachCheckEnabled(t *testing.T) {
 		t.Fatalf("expected ErrBreachCheckUnavailable, got %v", err)
 	}
 }
+
+func TestValidateAcceptsBothMFAFieldsEmpty(t *testing.T) {
+	o := validOptions()
+	o.MFARPID, o.MFARPDisplayName = "", ""
+	if err := o.Validate(); err != nil {
+		t.Fatalf("expected both-empty MFA config to pass (MFA stays unwired), got %v", err)
+	}
+}
+
+func TestValidateAcceptsBothMFAFieldsSet(t *testing.T) {
+	o := validOptions()
+	o.MFARPID, o.MFARPDisplayName = "localhost", "Greenwich Fire Responder (local)"
+	if err := o.Validate(); err != nil {
+		t.Fatalf("expected both-set MFA config to pass, got %v", err)
+	}
+}
+
+func TestValidateRejectsMFARPIDWithoutDisplayName(t *testing.T) {
+	o := validOptions()
+	o.MFARPID, o.MFARPDisplayName = "localhost", ""
+	if err := o.Validate(); err != ErrInvalidMFAConfig {
+		t.Fatalf("expected ErrInvalidMFAConfig, got %v", err)
+	}
+}
+
+func TestValidateRejectsMFADisplayNameWithoutRPID(t *testing.T) {
+	o := validOptions()
+	o.MFARPID, o.MFARPDisplayName = "", "Greenwich Fire Responder (local)"
+	if err := o.Validate(); err != ErrInvalidMFAConfig {
+		t.Fatalf("expected ErrInvalidMFAConfig, got %v", err)
+	}
+}

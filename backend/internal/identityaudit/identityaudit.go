@@ -20,9 +20,11 @@ import (
 
 // EventType is exactly one of the Section 10 catalog values (plus
 // InvitationRedemptionFailed, the "invitation redeemed-adjacent failure
-// event" AAX-06 requires for a reused-token attempt). It must stay in
+// event" AAX-06 requires for a reused-token attempt, and MFAVerification,
+// Step 9F-4's distinct "this session completed a WebAuthn authentication
+// ceremony" event, kept separate from MFAEnrollment). It must stay in
 // lockstep with the identity_audit_log.event_type CHECK constraint in
-// migration 000008.
+// migrations 000008 and 000009.
 type EventType string
 
 const (
@@ -35,6 +37,7 @@ const (
 	PasswordResetRequested     EventType = "password_reset_requested"
 	PasswordResetCompleted     EventType = "password_reset_completed"
 	MFAEnrollment              EventType = "mfa_enrollment"
+	MFAVerification            EventType = "mfa_verification"
 	MFARecovery                EventType = "mfa_recovery"
 	RoleOrScopeChange          EventType = "role_or_scope_change"
 	AccountStateChange         EventType = "account_state_change"
@@ -62,6 +65,7 @@ var allowedKeys = map[EventType]map[string]bool{
 	PasswordResetRequested:     {},
 	PasswordResetCompleted:     {"revoked_session_count": true},
 	MFAEnrollment:              {"method": true},
+	MFAVerification:            {"method": true},
 	MFARecovery:                {},
 	RoleOrScopeChange:          {"prior_role": true, "new_role": true, "prior_scope": true, "new_scope": true},
 	AccountStateChange:         {"prior_status": true, "new_status": true},

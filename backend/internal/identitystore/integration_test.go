@@ -26,11 +26,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"greenwich-fire-responder/backend/internal/identity"
 	"greenwich-fire-responder/backend/internal/invitation"
+	"greenwich-fire-responder/backend/internal/mfa"
 	"greenwich-fire-responder/backend/internal/passwordpolicy"
 	"greenwich-fire-responder/backend/internal/passwordreset"
 	"greenwich-fire-responder/backend/internal/session"
@@ -757,5 +759,241 @@ func TestLiveListUsers(t *testing.T) {
 	}
 	if len(clamped) != 2 {
 		t.Fatalf("expected the oversized limit to be clamped to still return both engine1 rows, got %d", len(clamped))
+	}
+}
+
+// TestLiveMFAEnrollmentCreatesCredentialAndActivates exercises Step 9F's
+// enrollment plumbing end to end: EnrollMFACredential persists exactly one
+// non-revoked passkey credential (round-trippable through the mfa
+// package's Marshal/UnmarshalCredential), and — because this administrator
+// already has a permanent password and MFA was the only remaining Section
+// 5 requirement — the same call activates the account, mirroring
+// TestLiveAdminMFAGateBlocksActivation's "before enrollment" half from the
+// other direction.
+func TestLiveMFAEnrollmentCreatesCredentialAndActivates(t *testing.T) {
+	pool := liveTestPool(t)
+	ctx, tx, p := beginRollback(t, pool)
+	adminID := insertBootstrapAdmin(ctx, t, tx)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	rawToken, _ := invitation.GenerateToken()
+	userID, err := p.CreateUserAndInvite(ctx, NewUserParams{
+		Email: uniqueEmail(t), DisplayName: "Synthetic Passkey Admin", Role: identity.RoleSystemAdministrator,
+		CreatedBy:             adminID,
+		InvitationTokenDigest: invitation.Digest(rawToken), InvitationExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(rawToken), now); err != nil {
+		t.Fatal(err)
+	}
+	status, err := p.EstablishPassword(ctx, userID, hashFor(t, "synthetic-test-password-mfa-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != identity.StatePasswordChangeRequired {
+		t.Fatalf("expected password_change_required pending MFA, got %s", status)
+	}
+
+	credData, err := mfa.MarshalCredential(&webauthn.Credential{
+		ID:        []byte("synthetic-credential-id-1"),
+		PublicKey: []byte("synthetic-public-key-bytes-1"),
+	})
+	if err != nil {
+		t.Fatalf("MarshalCredential: %v", err)
+	}
+	status, err = p.EnrollMFACredential(ctx, userID, mfa.CredentialTypePasskey, credData, "Synthetic Passkey")
+	if err != nil {
+		t.Fatalf("EnrollMFACredential: %v", err)
+	}
+	if status != identity.StateActive {
+		t.Fatalf("expected activation once MFA is enrolled, got %s", status)
+	}
+	u, _ := p.GetByID(ctx, userID)
+	if u.Status != identity.StateActive {
+		t.Fatalf("expected the persisted account status to be active, got %s", u.Status)
+	}
+
+	creds, err := p.ListMFACredentials(ctx, userID)
+	if err != nil {
+		t.Fatalf("ListMFACredentials: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("expected exactly one non-revoked credential, got %d", len(creds))
+	}
+	if creds[0].CredentialType != mfa.CredentialTypePasskey {
+		t.Fatalf("expected credential_type passkey, got %s", creds[0].CredentialType)
+	}
+	if creds[0].Label != "Synthetic Passkey" {
+		t.Fatalf("expected the enrollment label to round-trip, got %q", creds[0].Label)
+	}
+	decoded, err := mfa.UnmarshalCredential(creds[0].CredentialData)
+	if err != nil {
+		t.Fatalf("UnmarshalCredential: %v", err)
+	}
+	if string(decoded.ID) != "synthetic-credential-id-1" {
+		t.Fatalf("expected round-tripped credential ID, got %q", decoded.ID)
+	}
+}
+
+// TestLiveMFAEnrollmentDuplicateAndInvalidFailSafely covers Step 9F's
+// "duplicate/invalid enrollment fails safely": re-enrolling the identical
+// credential is rejected as a conflict, an unsupported credential type and
+// empty credential data are rejected as invalid input, and none of these
+// rejected attempts leaves behind a spurious credential row.
+func TestLiveMFAEnrollmentDuplicateAndInvalidFailSafely(t *testing.T) {
+	pool := liveTestPool(t)
+	ctx, tx, p := beginRollback(t, pool)
+	adminID := insertBootstrapAdmin(ctx, t, tx)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	rawToken, _ := invitation.GenerateToken()
+	userID, err := p.CreateUserAndInvite(ctx, NewUserParams{
+		Email: uniqueEmail(t), DisplayName: "Synthetic Duplicate Admin", Role: identity.RoleDepartmentAdministrator,
+		CreatedBy:             adminID,
+		InvitationTokenDigest: invitation.Digest(rawToken), InvitationExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(rawToken), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.EstablishPassword(ctx, userID, hashFor(t, "synthetic-test-password-mfa-2"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	credData, err := mfa.MarshalCredential(&webauthn.Credential{
+		ID:        []byte("synthetic-credential-id-2"),
+		PublicKey: []byte("synthetic-public-key-bytes-2"),
+	})
+	if err != nil {
+		t.Fatalf("MarshalCredential: %v", err)
+	}
+	if _, err := p.EnrollMFACredential(ctx, userID, mfa.CredentialTypePasskey, credData, ""); err != nil {
+		t.Fatalf("first enrollment: %v", err)
+	}
+
+	// The identical credential a second time is a conflict, not a silent
+	// success and not a second row.
+	if _, err := p.EnrollMFACredential(ctx, userID, mfa.CredentialTypePasskey, credData, ""); err != ErrConflict {
+		t.Fatalf("expected ErrConflict enrolling the same credential twice, got %v", err)
+	}
+	// TOTP is a separately authorized, not-yet-implemented credential type;
+	// this package must not accept it as a side door.
+	if _, err := p.EnrollMFACredential(ctx, userID, "totp", []byte("irrelevant"), ""); err != ErrInput {
+		t.Fatalf("expected ErrInput for an unsupported credential type, got %v", err)
+	}
+	// Empty credential data is always invalid input.
+	if _, err := p.EnrollMFACredential(ctx, userID, mfa.CredentialTypePasskey, nil, ""); err != ErrInput {
+		t.Fatalf("expected ErrInput for empty credential data, got %v", err)
+	}
+
+	creds, err := p.ListMFACredentials(ctx, userID)
+	if err != nil {
+		t.Fatalf("ListMFACredentials: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("expected exactly one surviving credential after the rejected attempts, got %d", len(creds))
+	}
+}
+
+// TestLiveSessionMFAVerification exercises Step 9F-4 against a real
+// database (requires migration 000009_mfa_session_verification.sql to
+// already be applied): a freshly created session resolves as
+// MFA-unverified by default, MarkSessionMFAVerified upgrades exactly that
+// session and no other session for the same user, and a subsequently
+// revoked session can never resolve at all — verification never survives,
+// let alone "expires separately from," the session's own revocation.
+func TestLiveSessionMFAVerification(t *testing.T) {
+	pool := liveTestPool(t)
+	ctx, tx, p := beginRollback(t, pool)
+	adminID := insertBootstrapAdmin(ctx, t, tx)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	rawInv, _ := invitation.GenerateToken()
+	userID, err := p.CreateUserAndInvite(ctx, NewUserParams{
+		Email: uniqueEmail(t), DisplayName: "Synthetic MFA Session", Role: identity.RoleResponder, CreatedBy: adminID,
+		InvitationTokenDigest: invitation.Digest(rawInv), InvitationExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RedeemInvitation(ctx, invitation.Digest(rawInv), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.EstablishPassword(ctx, userID, hashFor(t, "synthetic-test-password-mfasession"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := session.Config{IdleTimeout: time.Hour, AbsoluteLifetime: 24 * time.Hour}
+
+	rawA, _ := session.GenerateToken()
+	idA, err := p.CreateSession(ctx, userID, session.Digest(rawA), "device-a", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawB, _ := session.GenerateToken()
+	if _, err := p.CreateSession(ctx, userID, session.Digest(rawB), "device-b", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. A newly created session defaults to MFA-unverified.
+	authA, err := p.ResolveSession(ctx, session.Digest(rawA), cfg, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ResolveSession A: %v", err)
+	}
+	if authA.Session.MFAVerified() {
+		t.Fatal("expected a freshly created session to default to MFA-unverified")
+	}
+
+	// 2. Marking session A verified affects only session A.
+	if err := p.MarkSessionMFAVerified(ctx, idA, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("MarkSessionMFAVerified: %v", err)
+	}
+	authA, err = p.ResolveSession(ctx, session.Digest(rawA), cfg, now.Add(3*time.Minute))
+	if err != nil || !authA.Session.MFAVerified() {
+		t.Fatalf("expected session A to resolve MFA-verified, got %+v err=%v", authA, err)
+	}
+	authB, err := p.ResolveSession(ctx, session.Digest(rawB), cfg, now.Add(3*time.Minute))
+	if err != nil || authB.Session.MFAVerified() {
+		t.Fatalf("expected session B to remain MFA-unverified, got %+v err=%v", authB, err)
+	}
+
+	// 3. Revoking the verified session removes it from resolution
+	// entirely: verification never outlives, or is checked independently
+	// of, the session's own lifecycle.
+	if err := p.RevokeSession(ctx, idA, session.RevokedLogout, now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if _, err := p.ResolveSession(ctx, session.Digest(rawA), cfg, now.Add(5*time.Minute)); err != ErrTokenInvalid {
+		t.Fatalf("expected the revoked, previously-verified session to be unresolvable, got %v", err)
+	}
+
+	// 4. Marking an already-revoked session verified fails closed (9F-7K):
+	// zero rows are affected, so this is ErrNotFound, never a silent
+	// success, and it does not resurrect the session.
+	if err := p.MarkSessionMFAVerified(ctx, idA, now.Add(6*time.Minute)); err != ErrNotFound {
+		t.Fatalf("expected MarkSessionMFAVerified on a revoked session to fail with ErrNotFound, got %v", err)
+	}
+	if _, err := p.ResolveSession(ctx, session.Digest(rawA), cfg, now.Add(7*time.Minute)); err != ErrTokenInvalid {
+		t.Fatalf("expected the revoked session to remain unresolvable, got %v", err)
+	}
+
+	// 5. An unrevoked but absolutely-expired session also fails closed,
+	// never marked verified past its own lifetime ceiling.
+	rawC, _ := session.GenerateToken()
+	idC, err := p.CreateSession(ctx, userID, session.Digest(rawC), "device-c", now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.MarkSessionMFAVerified(ctx, idC, now.Add(time.Hour)); err != ErrNotFound {
+		t.Fatalf("expected MarkSessionMFAVerified on an expired session to fail with ErrNotFound, got %v", err)
+	}
+
+	// 6. An unknown session id fails identically, never a silent success.
+	if err := p.MarkSessionMFAVerified(ctx, idC+9999, now.Add(8*time.Minute)); err != ErrNotFound {
+		t.Fatalf("expected MarkSessionMFAVerified on an unknown session id to fail with ErrNotFound, got %v", err)
 	}
 }

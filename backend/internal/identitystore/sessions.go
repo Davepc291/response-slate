@@ -78,17 +78,18 @@ func (p *Postgres) ResolveSession(ctx context.Context, tokenDigest []byte, cfg s
 		deviceHint              *string
 		revokedAt               *time.Time
 		revocationReason        *string
+		mfaVerifiedAt           *time.Time
 		email, displayName      string
 		role, scope, status     string
 		lastLoginAt, createdAt2 *time.Time
 	)
 	row := p.DB.QueryRow(ctx, `SELECT s.id, s.user_id, s.device_hint, s.created_at, s.last_seen_at, s.expires_at,
-            s.revoked_at, s.revocation_reason,
+            s.revoked_at, s.revocation_reason, s.mfa_verified_at,
             u.normalized_email, u.display_name, u.role, coalesce(u.scope, ''), u.status, u.last_login_at, u.created_at
         FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token_digest = $1`, tokenDigest)
 	if err := row.Scan(&id, &userID, &deviceHint, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt,
-		&revokedAt, &revocationReason, &email, &displayName, &role, &scope, &status, &lastLoginAt, &createdAt2); err != nil {
+		&revokedAt, &revocationReason, &mfaVerifiedAt, &email, &displayName, &role, &scope, &status, &lastLoginAt, &createdAt2); err != nil {
 		if safeDB(err) == ErrNotFound {
 			return Authorized{}, ErrTokenInvalid
 		}
@@ -103,6 +104,7 @@ func (p *Postgres) ResolveSession(ctx context.Context, tokenDigest []byte, cfg s
 	if revocationReason != nil {
 		s.RevocationReason = session.RevocationReason(*revocationReason)
 	}
+	s.MFAVerifiedAt = mfaVerifiedAt
 
 	if !cfg.Usable(s, now) || identity.AccountState(status) != identity.StateActive {
 		return Authorized{}, ErrTokenInvalid
@@ -119,6 +121,36 @@ func (p *Postgres) ResolveSession(ctx context.Context, tokenDigest []byte, cfg s
 		view.CreatedAt = *createdAt2
 	}
 	return Authorized{Session: s, Account: view, Role: identity.Role(role), Scope: identity.Scope(scope)}, nil
+}
+
+// MarkSessionMFAVerified records that id completed a WebAuthn
+// authentication ceremony (Step 9F-4, Section 5, AAX-07): only this one
+// session row is affected, never every session belonging to the owning
+// account, and never any mfa_credentials row (enrollment and per-session
+// verification are deliberately distinct facts). The update is scoped to a
+// session that is, as of now, both unrevoked AND unexpired — mirroring
+// exactly the two conditions session.Config.Usable checks — and the
+// affected row count is verified: a revoked session, an already-expired
+// session, or an unknown id all return ErrNotFound rather than a silent
+// success, so a caller (FinishMFALogin) can never report a completed
+// verification, or record its audit event, for a session that was not
+// actually updated (e.g. a concurrent revocation racing this call).
+func (p *Postgres) MarkSessionMFAVerified(ctx context.Context, id session.ID, now time.Time) error {
+	if p == nil || p.DB == nil {
+		return ErrUnavailable
+	}
+	if now.IsZero() {
+		return ErrInput
+	}
+	tag, err := p.DB.Exec(ctx, `UPDATE sessions SET mfa_verified_at = $1
+        WHERE id = $2 AND revoked_at IS NULL AND expires_at > $1`, now, int64(id))
+	if err != nil {
+		return safeDB(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // TouchSession advances a session's last_seen_at, extending its idle

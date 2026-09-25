@@ -1,9 +1,11 @@
+import { provideHttpClient } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 
 import { App } from '../app';
 import { routes } from '../app.routes';
-import { BoardPreview } from '../board-preview/board-preview';
+import { requireVerifiedSession } from '../mobile-auth/auth-data/require-verified-session.guard';
 import { MobileCalls } from './mobile-calls/mobile-calls';
 import { MobileEvidence } from './mobile-evidence/mobile-evidence';
 import { MobileHome } from './mobile-home/mobile-home';
@@ -13,27 +15,27 @@ import { MobileShell } from './mobile-shell/mobile-shell';
 import { MobileUnits } from './mobile-units/mobile-units';
 import { MobileWelcome } from './mobile-welcome/mobile-welcome';
 
+const ACCOUNT = {
+  user_id: 1,
+  email: 'a@example.com',
+  display_name: 'A',
+  role: 'responder',
+  status: 'active',
+};
+
+// Router navigation (and therefore a guard's HTTP call) is dispatched a few
+// microtask turns after navigateByUrl returns its promise, so httpMock
+// assertions against a guarded route's request must wait a tick first.
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe('mobile routes', () => {
-  it('preserves the desktop board as the exact root route', () => {
-    expect(routes[0]).toEqual({ path: '', component: BoardPreview, pathMatch: 'full' });
+  it('mounts the mobile children under /mobile', () => {
     expect(routes.some((route) => route.path === 'mobile')).toBe(true);
   });
 
-  it('loads the existing BoardPreview at /', async () => {
-    TestBed.configureTestingModule({ imports: [App], providers: [provideRouter(routes)] });
-    const fixture = TestBed.createComponent(App);
-    const router = TestBed.inject(Router);
-
-    await router.navigateByUrl('/');
-    await fixture.whenStable();
-    fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('app-board-preview .shadow-board')).not.toBeNull();
-    fixture.destroy();
-  });
-
-  it('defines only the approved open mobile child routes', () => {
+  it('defines only the approved mobile child routes, each protected content screen guarded', () => {
     const shellRoute = mobileRoutes[0];
     expect(shellRoute.component).toBe(MobileShell);
     expect(shellRoute.canActivate).toBeUndefined();
@@ -41,15 +43,14 @@ describe('mobile routes', () => {
     expect(shellRoute.children).toEqual([
       { path: '', pathMatch: 'full', redirectTo: 'welcome' },
       { path: 'welcome', component: MobileWelcome },
-      { path: 'home', component: MobileHome },
-      { path: 'calls', component: MobileCalls },
-      { path: 'units', component: MobileUnits },
-      { path: 'evidence', component: MobileEvidence },
-      { path: 'settings', component: MobileSettings },
+      { path: 'home', component: MobileHome, canActivate: [requireVerifiedSession] },
+      { path: 'calls', component: MobileCalls, canActivate: [requireVerifiedSession] },
+      { path: 'units', component: MobileUnits, canActivate: [requireVerifiedSession] },
+      { path: 'evidence', component: MobileEvidence, canActivate: [requireVerifiedSession] },
+      { path: 'settings', component: MobileSettings, canActivate: [requireVerifiedSession] },
       { path: '**', redirectTo: 'welcome' },
     ]);
     for (const route of shellRoute.children ?? []) {
-      expect(route.canActivate).toBeUndefined();
       expect(route.canMatch).toBeUndefined();
     }
   });
@@ -65,24 +66,36 @@ describe('mobile routes', () => {
     expect(router.url).toBe('/mobile/welcome');
   });
 
-  it('keeps direct mobile routes intentionally accessible', async () => {
-    TestBed.configureTestingModule({ providers: [provideRouter(routes)] });
+  it('reaches the protected mobile content routes once /api/auth/me confirms a session', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideRouter(routes), provideHttpClient(), provideHttpClientTesting()],
+    });
     const router = TestBed.inject(Router);
+    const httpMock = TestBed.inject(HttpTestingController);
 
     for (const path of ['home', 'calls', 'units', 'evidence', 'settings']) {
-      const result = await router.navigateByUrl(`/mobile/${path}`);
-      expect(result).toBe(true);
+      const navigation = router.navigateByUrl(`/mobile/${path}`);
+      await flushMicrotasks();
+      httpMock.expectOne('/api/auth/me').flush(ACCOUNT);
+      expect(await navigation).toBe(true);
       expect(router.url).toBe(`/mobile/${path}`);
     }
   });
 
   it('renders the active mobile navigation semantics and hides navigation on welcome', async () => {
-    TestBed.configureTestingModule({ imports: [App], providers: [provideRouter(routes)] });
+    TestBed.configureTestingModule({
+      imports: [App],
+      providers: [provideRouter(routes), provideHttpClient(), provideHttpClientTesting()],
+    });
     const fixture = TestBed.createComponent(App);
     const router = TestBed.inject(Router);
+    const httpMock = TestBed.inject(HttpTestingController);
     fixture.detectChanges();
 
-    await router.navigateByUrl('/mobile/home');
+    const navigation = router.navigateByUrl('/mobile/home');
+    await flushMicrotasks();
+    httpMock.expectOne('/api/auth/me').flush(ACCOUNT);
+    await navigation;
     await fixture.whenStable();
     fixture.detectChanges();
     const el = fixture.nativeElement as HTMLElement;

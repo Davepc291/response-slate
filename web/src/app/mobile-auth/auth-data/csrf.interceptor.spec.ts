@@ -113,6 +113,22 @@ describe('csrfInterceptor', () => {
     req.flush({});
   });
 
+  it('attaches X-CSRF-Token on POST /api/auth/mfa/enroll', () => {
+    mockCookieHeader('__Host-gfr_csrf=csrf-value-mfa-1');
+    http.post('/api/auth/mfa/enroll', { action: 'begin' }).subscribe();
+    const req = httpMock.expectOne('/api/auth/mfa/enroll');
+    expect(req.request.headers.get('X-CSRF-Token')).toBe('csrf-value-mfa-1');
+    req.flush({});
+  });
+
+  it('attaches X-CSRF-Token on POST /api/auth/mfa/verify', () => {
+    mockCookieHeader('__Host-gfr_csrf=csrf-value-mfa-2');
+    http.post('/api/auth/mfa/verify', { action: 'begin' }).subscribe();
+    const req = httpMock.expectOne('/api/auth/mfa/verify');
+    expect(req.request.headers.get('X-CSRF-Token')).toBe('csrf-value-mfa-2');
+    req.flush({});
+  });
+
   it('ignores a same-named cookie value pair that only prefix-matches the session cookie', () => {
     // Guards against a naive substring/startsWith cookie parse that could
     // accidentally read part of __Host-gfr_session as if it were the CSRF

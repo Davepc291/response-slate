@@ -8,6 +8,8 @@ import { MobileAuthAdminUserNew } from './mobile-auth-admin-user-new/mobile-auth
 import { MobileAuthAdminUsers } from './mobile-auth-admin-users/mobile-auth-admin-users';
 import { MobileAuthFirstTimeAccess } from './mobile-auth-first-time-access/mobile-auth-first-time-access';
 import { MobileAuthForgotPassword } from './mobile-auth-forgot-password/mobile-auth-forgot-password';
+import { MobileAuthMfaEnroll } from './mobile-auth-mfa-enroll/mobile-auth-mfa-enroll';
+import { MobileAuthMfaVerify } from './mobile-auth-mfa-verify/mobile-auth-mfa-verify';
 import { MobileAuthResetPassword } from './mobile-auth-reset-password/mobile-auth-reset-password';
 import { MobileAuthServiceUnavailable } from './mobile-auth-service-unavailable/mobile-auth-service-unavailable';
 import { MobileAuthSessions } from './mobile-auth-sessions/mobile-auth-sessions';
@@ -41,6 +43,16 @@ export const mobileAuthRoutes: Routes = [
       { path: 'forgot-password', component: MobileAuthForgotPassword },
       { path: 'reset-password', component: MobileAuthResetPassword },
       { path: 'service-unavailable', component: MobileAuthServiceUnavailable },
+      // Step 9F-5: mfa/enroll is deliberately unguarded — see
+      // MobileAuthMfaEnroll's own doc comment for why it must be reachable
+      // both with a normal session and with only the narrow MFA-enrollment
+      // bridging cookie, neither of which requireVerifiedSession can check
+      // (it only ever verifies a normal session). mfa/verify, in contrast,
+      // is only ever meaningful for a normal, already-established session
+      // (POST /api/auth/mfa/verify accepts nothing else), so it carries the
+      // identical guard the sessions preview screen does.
+      { path: 'mfa/enroll', component: MobileAuthMfaEnroll },
+      { path: 'mfa/verify', component: MobileAuthMfaVerify, canActivate: [requireVerifiedSession] },
       {
         path: 'sessions',
         component: MobileAuthSessions,

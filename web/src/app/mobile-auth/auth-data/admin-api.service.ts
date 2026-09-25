@@ -29,6 +29,7 @@ export type AdminErrorKind =
   | 'invalid_input'
   | 'self_action_forbidden'
   | 'session_expired'
+  | 'mfa_verification_required'
   | 'rate_limited'
   | 'unavailable';
 
@@ -64,6 +65,16 @@ const CODE_TO_FAILURE: Readonly<Record<string, AdminFailure>> = {
     message: 'You cannot perform this action on your own account.',
   },
   rate_limited: { kind: 'rate_limited', message: 'Too many attempts. Try again later.' },
+  // Step 9F-4 (requireAdminMFAVerified): the caller is authenticated as an
+  // administrator, but this specific session has not completed a WebAuthn
+  // verification ceremony yet. mfa-required.interceptor.ts reacts to this
+  // exact code by navigating to /mobile/auth/mfa/verify, so a calling
+  // component rarely renders this message itself — it exists here mainly
+  // so this service's own failure mapping stays complete and testable.
+  mfa_verification_required: {
+    kind: 'mfa_verification_required',
+    message: 'This action requires a passkey-verified session. Verify your passkey and try again.',
+  },
   // A missing/expired CSRF cookie or a rejected origin both indicate the
   // caller no longer has a usable session context; both fold into the same
   // safe "sign in again" state, mirroring AuthApiService.

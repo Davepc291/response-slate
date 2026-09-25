@@ -1,0 +1,38 @@
+<section class="auth-screen" aria-labelledby="auth-mfa-verify-title">
+  <p class="auth-kicker">{{ headerTitle }}</p>
+  <h1 id="auth-mfa-verify-title" tabindex="-1">Verify your passkey</h1>
+  <p class="auth-lede">
+    Administrator access requires passkey verification for this session. Verify your passkey to
+    continue.
+  </p>
+
+  <div class="auth-status" role="status" aria-live="polite">
+    @if (errorMessage()) {
+      <p class="auth-error" id="auth-mfa-verify-error">{{ errorMessage() }}</p>
+    }
+    @if (phase() === 'awaiting-device') {
+      <p class="auth-info">Follow your device's prompt to verify your passkey.</p>
+    }
+  </div>
+
+  @if (!supported()) {
+    <p class="auth-error">
+      Passkeys are not supported in this browser or on this device. Try a current version of
+      Chrome, Edge, Safari, or Firefox, or contact your administrator.
+    </p>
+  } @else {
+    <button
+      type="button"
+      class="primary"
+      [disabled]="busy()"
+      [attr.aria-describedby]="errorMessage() ? 'auth-mfa-verify-error' : null"
+      (click)="startVerification()"
+    >
+      {{ buttonLabel() }}
+    </button>
+  }
+
+  <div class="auth-links">
+    <a routerLink="/mobile/auth/sign-in">Back to sign in</a>
+  </div>
+</section>

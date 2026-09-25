@@ -101,3 +101,34 @@ func TestRunWithConfigFailsFastOnInvalidAuthConfig(t *testing.T) {
 		t.Fatal("expected an error for invalid auth configuration rather than an insecure default")
 	}
 }
+
+// TestRunWithConfigFailsFastOnMFARPIDWithoutDisplayName is deterministic,
+// no-database coverage for Step 9F-6's MFA wiring in buildAuthHandlers:
+// authconfig.Options.Validate rejects GFR_AUTH_MFA_RP_ID being set without
+// its required companion GFR_AUTH_MFA_RP_DISPLAY_NAME before
+// buildAuthHandlers ever opens a database connection, so this never needs a
+// real PostgreSQL instance (unlike the successful-wiring case, which does —
+// see auth_live_test.go's opt-in live test).
+func TestRunWithConfigFailsFastOnMFARPIDWithoutDisplayName(t *testing.T) {
+	cfg := config.Config{HTTPAddr: "127.0.0.1:0", DatabaseURL: "postgres://example.invalid/dev", DatabaseRequired: true}
+	cfg.Auth.Enabled = true
+	cfg.Auth.SessionIdleTimeout = 15 * time.Minute
+	cfg.Auth.SessionMaxLifetime = 12 * time.Hour
+	cfg.Auth.PasswordResetTTL = time.Hour
+	cfg.Auth.InvitationTTL = 24 * time.Hour
+	cfg.Auth.CSRFSecret = []byte("01234567890123456789012345678901")
+	cfg.Auth.AllowedOrigins = []string{"https://app.example.test"}
+	cfg.Auth.LoginRateLimitPerAccount.MaxAttempts, cfg.Auth.LoginRateLimitPerAccount.Window = 5, 15*time.Minute
+	cfg.Auth.LoginRateLimitPerIP.MaxAttempts, cfg.Auth.LoginRateLimitPerIP.Window = 20, 15*time.Minute
+	cfg.Auth.InvitationRateLimit.MaxAttempts, cfg.Auth.InvitationRateLimit.Window = 10, time.Hour
+	cfg.Auth.PasswordResetRequestRateLimit.MaxAttempts, cfg.Auth.PasswordResetRequestRateLimit.Window = 5, time.Hour
+	cfg.Auth.PasswordResetCompleteRateLimit.MaxAttempts, cfg.Auth.PasswordResetCompleteRateLimit.Window = 5, time.Hour
+	// The one deliberately invalid field: RPID set without its required
+	// companion.
+	cfg.Auth.MFARPID = "localhost"
+
+	err := runWithConfig(context.Background(), cfg, nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("expected an error when GFR_AUTH_MFA_RP_ID is set without GFR_AUTH_MFA_RP_DISPLAY_NAME")
+	}
+}

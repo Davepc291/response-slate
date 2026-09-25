@@ -152,7 +152,7 @@ func allowedEventType(t identityaudit.EventType) (identityaudit.EventType, bool)
 	case identityaudit.LoginSuccess, identityaudit.LoginFailure, identityaudit.InvitationCreated,
 		identityaudit.InvitationRedeemed, identityaudit.InvitationRedemptionFailed, identityaudit.InvitationExpired,
 		identityaudit.PasswordResetRequested, identityaudit.PasswordResetCompleted,
-		identityaudit.MFAEnrollment, identityaudit.MFARecovery, identityaudit.RoleOrScopeChange,
+		identityaudit.MFAEnrollment, identityaudit.MFAVerification, identityaudit.MFARecovery, identityaudit.RoleOrScopeChange,
 		identityaudit.AccountStateChange, identityaudit.ProtectedCallAccess, identityaudit.NotificationDeviceEvent,
 		identityaudit.SessionCreated, identityaudit.SessionRevoked, identityaudit.AdministrativeAction:
 		return t, true

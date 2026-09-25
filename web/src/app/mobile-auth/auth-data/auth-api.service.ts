@@ -13,6 +13,7 @@ import {
   SessionView,
   StatusResponse,
 } from './auth-api.models';
+import { MFAEnrollBeginResponse, MFAVerifyBeginResponse } from './webauthn.models';
 
 /**
  * Safe, UI-facing failure categories. Every backend error envelope is
@@ -31,6 +32,9 @@ export type AuthErrorKind =
   | 'rate_limited'
   | 'not_authenticated'
   | 'session_expired'
+  | 'mfa_not_eligible'
+  | 'mfa_ceremony_invalid'
+  | 'mfa_response_invalid'
   | 'unavailable';
 
 export interface AuthFailure {
@@ -82,6 +86,23 @@ const CODE_TO_FAILURE: Readonly<Record<string, AuthFailure>> = {
     message: 'This password has appeared in a data breach. Choose a different one.',
   },
   not_authenticated: { kind: 'not_authenticated', message: 'Sign-in required.' },
+  // Shared by both /api/auth/mfa/enroll and /api/auth/mfa/verify (Step
+  // 9F-5): each backend route uses this identical code for a different
+  // underlying reason (no eligible account state to enroll; no enrolled
+  // passkey to verify), so this message is written generically enough to be
+  // safe on either screen rather than distinguishing them.
+  mfa_not_eligible: {
+    kind: 'mfa_not_eligible',
+    message: 'This account cannot complete this passkey step right now.',
+  },
+  mfa_ceremony_invalid: {
+    kind: 'mfa_ceremony_invalid',
+    message: 'That took too long. Start this step again.',
+  },
+  mfa_response_invalid: {
+    kind: 'mfa_response_invalid',
+    message: 'That passkey could not be verified. Try again.',
+  },
   // A missing/expired CSRF cookie or a rejected origin both indicate the
   // caller no longer has a usable session context; both fold into the same
   // safe "sign in again" state rather than distinguishing the cause.
@@ -139,6 +160,33 @@ export class AuthApiService {
 
   logoutAll(): Observable<AuthResult<StatusResponse>> {
     return this.post<StatusResponse>('/api/auth/logout-all', {});
+  }
+
+  /**
+   * Begins a WebAuthn registration ceremony (Step 9F-3). Reachable either
+   * with a normal session (adding another passkey) or, for a
+   * password_change_required administrator, with the narrow
+   * __Host-gfr_mfa_enroll bridging cookie the browser attaches
+   * automatically — this call never reads or references either cookie's
+   * value directly.
+   */
+  mfaEnrollBegin(): Observable<AuthResult<MFAEnrollBeginResponse>> {
+    return this.post<MFAEnrollBeginResponse>('/api/auth/mfa/enroll', { action: 'begin' });
+  }
+
+  /** Completes a WebAuthn registration ceremony with the browser's raw response, converted to JSON by auth-data/webauthn.ts. */
+  mfaEnrollFinish(credential: unknown): Observable<AuthResult<StatusResponse>> {
+    return this.post<StatusResponse>('/api/auth/mfa/enroll', { action: 'finish', credential });
+  }
+
+  /** Begins a WebAuthn authentication ceremony (Step 9F-4) against the caller's current, already-established session. */
+  mfaVerifyBegin(): Observable<AuthResult<MFAVerifyBeginResponse>> {
+    return this.post<MFAVerifyBeginResponse>('/api/auth/mfa/verify', { action: 'begin' });
+  }
+
+  /** Completes a WebAuthn authentication ceremony, marking the current session MFA-verified on success. */
+  mfaVerifyFinish(credential: unknown): Observable<AuthResult<StatusResponse>> {
+    return this.post<StatusResponse>('/api/auth/mfa/verify', { action: 'finish', credential });
   }
 
   revokeSession(id: number): Observable<AuthResult<StatusResponse>> {

@@ -105,6 +105,9 @@ type Store interface {
 	ListActiveSessions(ctx context.Context, userID identity.UserID) ([]session.Session, error)
 	RequestPasswordReset(ctx context.Context, email string, issuedBy identity.UserID, newTokenDigest []byte, expiresAt time.Time) (bool, identity.UserID, error)
 	CompletePasswordReset(ctx context.Context, rawTokenDigest []byte, newPasswordHash string, now time.Time) (identity.UserID, error)
+	EnrollMFACredential(ctx context.Context, userID identity.UserID, credentialType string, credentialData []byte, label string) (identity.AccountState, error)
+	ListMFACredentials(ctx context.Context, userID identity.UserID) ([]identitystore.MFACredential, error)
+	MarkSessionMFAVerified(ctx context.Context, id session.ID, now time.Time) error
 }
 
 // AuditRecorder is the subset of identityauditstore.Store this service
@@ -134,6 +137,17 @@ type Service struct {
 	audit  AuditRecorder
 	cfg    Config
 	logger *slog.Logger
+
+	// mfaProvider, mfaCeremonies, and mfaEnrollCreds implement the Step
+	// 9F-3 WebAuthn passkey enrollment surface; see mfa.go. mfaProvider is
+	// nil until a caller opts in via SetMFAProvider (never called by this
+	// deployment's current production wiring, per that task's explicit
+	// deferral of production activation); the two in-memory stores are
+	// always initialized so issuing a bridging credential during
+	// RedeemInvitationAndSetPassword never depends on that opt-in.
+	mfaProvider    MFAProvider
+	mfaCeremonies  *mfaCeremonyStore
+	mfaEnrollCreds *enrollmentCredentialStore
 }
 
 // New constructs a Service. logger may be nil (a no-op logger is used),
@@ -160,7 +174,11 @@ func New(store Store, audit AuditRecorder, cfg Config, logger *slog.Logger) *Ser
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
-	return &Service{store: store, audit: audit, cfg: cfg, logger: logger}
+	return &Service{
+		store: store, audit: audit, cfg: cfg, logger: logger,
+		mfaCeremonies:  newMFACeremonyStore(),
+		mfaEnrollCreds: newEnrollmentCredentialStore(),
+	}
 }
 
 type discardWriter struct{}

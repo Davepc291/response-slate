@@ -510,6 +510,14 @@ $env:GFR_AUTH_RATE_LIMIT_PER_IP = '20/15m'
 $env:GFR_AUTH_RATE_LIMIT_INVITATION = '10/1h'
 $env:GFR_AUTH_RATE_LIMIT_PASSWORD_RESET = '5/1h'
 $env:GFR_AUTH_BREACH_CHECK_ENABLED = 'false'
+# Step 9F-6: without these two, MFA stays exactly as unwired as before —
+# cmd/api never calls SetMFAProvider, and /api/auth/mfa/* keeps failing
+# closed with 503. Both must be set together (Validate rejects one without
+# the other). RPID is the effective domain only — no scheme, no port — and
+# must match the host GFR_AUTH_ALLOWED_ORIGINS above already allowlists
+# (RP origins are not separately configured; they reuse that same list).
+$env:GFR_AUTH_MFA_RP_ID = 'localhost'
+$env:GFR_AUTH_MFA_RP_DISPLAY_NAME = 'Greenwich Fire Responder (local)'
 ```
 
 `GFR_AUTH_ALLOWED_ORIGINS` must exactly match the origin the browser actually

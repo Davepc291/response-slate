@@ -1,0 +1,41 @@
+@use '../mobile-auth-forms' as forms;
+
+:host {
+  display: block;
+}
+
+.auth-screen {
+  @include forms.screen-base;
+}
+
+.auth-kicker {
+  @include forms.kicker;
+}
+
+h1 {
+  @include forms.heading;
+}
+
+.auth-lede {
+  @include forms.lede;
+}
+
+.auth-status {
+  @include forms.status-region;
+}
+
+.auth-error {
+  @include forms.error-banner;
+}
+
+.auth-info {
+  @include forms.info-banner;
+}
+
+button.primary {
+  @include forms.primary-button;
+}
+
+.auth-links {
+  @include forms.link-row;
+}

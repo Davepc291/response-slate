@@ -37,6 +37,14 @@ func (h *Handlers) handleFirstTimeLogin(w http.ResponseWriter, r *http.Request) 
 	result, err := h.svc.RedeemInvitationAndSetPassword(r.Context(), req.Token, req.Password, now)
 	switch {
 	case err == nil:
+		// Step 9F-3: an administrator left password_change_required by this
+		// call (MFA still pending) receives the narrow bridging credential
+		// here instead of a normal session cookie — see
+		// identityservice/mfa.go's package doc comment for why no normal
+		// session can exist yet for this account.
+		if result.MFAEnrollmentToken != "" {
+			h.setMFAEnrollCookies(w, result.MFAEnrollmentToken, result.MFAEnrollmentExpiresAt)
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": string(result.Status)})
 	case errors.Is(err, identityservice.ErrTokenExpired):
 		// Section 3's exact, deliberate exception-case wording.

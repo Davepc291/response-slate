@@ -32,6 +32,7 @@ func (h *Handlers) requireSession(next http.HandlerFunc) http.HandlerFunc {
 		principal := Principal{
 			UserID: auth.Account.ID, SessionID: auth.Session.ID, Role: auth.Role, Scope: auth.Scope,
 			Email: auth.Account.Email, DisplayName: auth.Account.DisplayName, Status: auth.Account.Status,
+			MFAVerified: auth.Session.MFAVerified(),
 		}
 		ctx := context.WithValue(r.Context(), ctxPrincipal, principal)
 		ctx = context.WithValue(ctx, ctxSessionToken, rawToken)
@@ -83,6 +84,104 @@ func (h *Handlers) requireCSRF(next http.HandlerFunc) http.HandlerFunc {
 		cookieValue, ok := authcookie.ReadCSRFCookie(r)
 		if !ok || cookieValue != header {
 			writeError(w, http.StatusForbidden, "csrf_validation_failed", "Request could not be verified.")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// requireSessionOrMFAEnrollment authenticates POST /api/auth/mfa/enroll
+// under either of two distinct credentials: the narrow, short-lived
+// MFA-enrollment cookie identityservice issues only when an administrator
+// has just established a permanent password but has not yet completed MFA
+// (see identityservice's mfa.go package doc comment for why the ordinary
+// session machinery can never authenticate that account), or the normal
+// browser session cookie (an already-active account adding another
+// passkey). No other route accepts the first credential; requireSession
+// itself is completely unmodified and used everywhere else. Both branches,
+// and the final fallthrough, return the identical 401 response, never
+// distinguishing which credential (if any) was presented.
+//
+// Step 9F-6 live-validation finding: the bridging cookie is checked FIRST,
+// deliberately — not for symmetry with anything, but because both
+// credentials share the single __Host-gfr_csrf cookie slot
+// (setMFAEnrollCookies overwrites it, deriving the CSRF value from the
+// bridging token's digest). A browser that happens to still hold a valid
+// normal session cookie at the exact moment a bridging cookie is issued
+// (for example: an administrator who redeemed a second account's
+// invitation without signing out of their own session first) previously
+// hit an unconditional session-cookie-first check here, which silently
+// authenticated the request as the OTHER, unrelated session — producing a
+// CSRF digest mismatch (since the CSRF cookie now carries the bridging
+// token's derivation) that surfaced as a generic "session expired" error,
+// and which would have silently misattributed the enrollment to the wrong
+// account had the CSRF values coincidentally lined up. The bridging
+// credential is narrow, single-purpose, and short-lived (15 minutes,
+// mfaEnrollmentCredentialTTL) — a far stronger signal of specific intent
+// than a general-purpose session cookie that persists for hours across
+// unrelated activity — so it takes precedence whenever both are present
+// and valid.
+func (h *Handlers) requireSessionOrMFAEnrollment(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		now := h.clock()
+		if rawToken, ok := authcookie.ReadMFAEnrollToken(r); ok {
+			if mp, err := h.svc.ResolveMFAEnrollmentCredential(r.Context(), rawToken, now); err == nil {
+				principal := Principal{
+					UserID: mp.UserID, Role: mp.Role, Scope: mp.Scope,
+					Email: mp.Email, DisplayName: mp.DisplayName, Status: mp.Status,
+				}
+				ctx := context.WithValue(r.Context(), ctxPrincipal, principal)
+				ctx = context.WithValue(ctx, ctxSessionToken, rawToken)
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+		if rawToken, ok := authcookie.ReadSessionToken(r); ok {
+			if auth, err := h.svc.ResolveSession(r.Context(), rawToken, now); err == nil {
+				principal := Principal{
+					UserID: auth.Account.ID, SessionID: auth.Session.ID, Role: auth.Role, Scope: auth.Scope,
+					Email: auth.Account.Email, DisplayName: auth.Account.DisplayName, Status: auth.Account.Status,
+					MFAVerified: auth.Session.MFAVerified(),
+				}
+				ctx := context.WithValue(r.Context(), ctxPrincipal, principal)
+				ctx = context.WithValue(ctx, ctxSessionToken, rawToken)
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+		writeError(w, http.StatusUnauthorized, "not_authenticated", "Sign-in required.")
+	}
+}
+
+// requireAdminMFAVerified enforces Step 9F-4's second, independent
+// condition for every /api/admin/* route, beyond the existing
+// authenticated-session and role/scope authorization checks: an
+// administrator's CURRENT SESSION must itself have completed a WebAuthn
+// authentication ceremony (Section 5, AAX-07). An enrolled credential's
+// mere existence is never sufficient — the contract requires "an
+// MFA-verified current session," not merely "an MFA-capable account" — and
+// neither is having merely supplied the correct password at login; both of
+// those are necessary but explicitly not sufficient conditions this
+// middleware refuses to conflate. Must be applied after requireSession (so
+// a Principal is present) and before every admin handler.
+//
+// A non-administrator's request passes through unaffected here: it still
+// reaches, and is denied by, the exact same adminservice authorization
+// check as before this task, so its response is byte-for-byte unchanged.
+// An administrator whose current session has not completed the ceremony
+// fails closed with a distinct, safe-to-reveal 403 — safe because the
+// caller has already authenticated as this specific administrator, so
+// naming the missing step leaks nothing an attacker didn't already know
+// merely by holding this session.
+func (h *Handlers) requireAdminMFAVerified(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := PrincipalFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "not_authenticated", "Sign-in required.")
+			return
+		}
+		if p.Role.IsAdministrator() && !p.MFAVerified {
+			writeError(w, http.StatusForbidden, "mfa_verification_required", "This action requires a passkey-verified session. Verify your passkey and try again.")
 			return
 		}
 		next(w, r)

@@ -5,14 +5,19 @@ import { map } from 'rxjs';
 import { AuthApiService } from './auth-api.service';
 
 /**
- * Route guard for the /mobile/auth/sessions preview screen only (Step 9D
- * requirement 9: "must require a successfully verified /api/auth/me
- * session"). It is not applied to any existing production mobile route.
- * The backend remains the actual authorization boundary — this guard only
- * re-verifies against a fresh GET /api/auth/me on every activation and
- * sends an unverified caller to sign-in, matching the session-state
- * foundation's own "server is the source of truth" rule rather than
- * trusting any cached client state.
+ * Route guard originally added for the /mobile/auth/sessions preview screen
+ * (Step 9D requirement 9: "must require a successfully verified
+ * /api/auth/me session") and reused, unchanged, by Step 9F-7 production
+ * activation for the protected mobile content routes (/mobile/home,
+ * /calls, /units, /evidence, /settings). app.routes.ts's '/' entry uses the
+ * sibling redirect-root.guard.ts instead — Angular does not allow
+ * combining canActivate with redirectTo on the same route — but that guard
+ * performs the identical GET /api/auth/me check via the same
+ * AuthApiService. The backend remains the actual authorization boundary —
+ * this guard only re-verifies against a fresh GET /api/auth/me on every
+ * activation and sends an unverified caller to sign-in, matching the
+ * session-state foundation's own "server is the source of truth" rule
+ * rather than trusting any cached client state.
  */
 export const requireVerifiedSession: CanActivateFn = () => {
   const api = inject(AuthApiService);

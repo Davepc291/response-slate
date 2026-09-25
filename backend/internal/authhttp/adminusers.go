@@ -21,21 +21,25 @@ const adminDefaultPageSize = 25
 // surface (docs/authentication-authorization-v1.md Section 7, Section
 // 11.3): explicit, narrow action routes rather than one unrestricted
 // generic update endpoint, mirroring this file's own doc comment rationale.
-// Every route requires a resolved session (requireSession); every
-// state-changing route additionally requires CSRF (requireCSRF). No route
-// here accepts an invitation, reset, password, session, or CSRF token in a
-// path or query string — only a numeric, opaque user id.
+// Every route requires, in order: a resolved session (requireSession), an
+// MFA-verified current session for an administrator caller
+// (requireAdminMFAVerified, Step 9F-4/AAX-07 — a non-administrator passes
+// through unaffected and is denied by adminservice's own role/scope check
+// exactly as before), and — for every state-changing route — CSRF
+// (requireCSRF). No route here accepts an invitation, reset, password,
+// session, or CSRF token in a path or query string — only a numeric,
+// opaque user id.
 func (h *Handlers) registerAdminRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/admin/users", h.requireSession(h.handleAdminListUsers))
-	mux.HandleFunc("POST /api/admin/users", h.requireSession(h.requireCSRF(h.handleAdminCreateUser)))
-	mux.HandleFunc("GET /api/admin/users/{id}", h.requireSession(h.handleAdminGetUser))
-	mux.HandleFunc("POST /api/admin/users/{id}/role", h.requireSession(h.requireCSRF(h.handleAdminChangeRole)))
-	mux.HandleFunc("POST /api/admin/users/{id}/resend-invitation", h.requireSession(h.requireCSRF(h.handleAdminResendInvitation)))
-	mux.HandleFunc("POST /api/admin/users/{id}/suspend", h.requireSession(h.requireCSRF(h.handleAdminSuspend)))
-	mux.HandleFunc("POST /api/admin/users/{id}/disable", h.requireSession(h.requireCSRF(h.handleAdminDisable)))
-	mux.HandleFunc("POST /api/admin/users/{id}/restore", h.requireSession(h.requireCSRF(h.handleAdminRestore)))
-	mux.HandleFunc("POST /api/admin/users/{id}/revoke-sessions", h.requireSession(h.requireCSRF(h.handleAdminRevokeSessions)))
-	mux.HandleFunc("POST /api/admin/users/{id}/reset-credential", h.requireSession(h.requireCSRF(h.handleAdminResetCredential)))
+	mux.HandleFunc("GET /api/admin/users", h.requireSession(h.requireAdminMFAVerified(h.handleAdminListUsers)))
+	mux.HandleFunc("POST /api/admin/users", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminCreateUser))))
+	mux.HandleFunc("GET /api/admin/users/{id}", h.requireSession(h.requireAdminMFAVerified(h.handleAdminGetUser)))
+	mux.HandleFunc("POST /api/admin/users/{id}/role", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminChangeRole))))
+	mux.HandleFunc("POST /api/admin/users/{id}/resend-invitation", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminResendInvitation))))
+	mux.HandleFunc("POST /api/admin/users/{id}/suspend", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminSuspend))))
+	mux.HandleFunc("POST /api/admin/users/{id}/disable", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminDisable))))
+	mux.HandleFunc("POST /api/admin/users/{id}/restore", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminRestore))))
+	mux.HandleFunc("POST /api/admin/users/{id}/revoke-sessions", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminRevokeSessions))))
+	mux.HandleFunc("POST /api/admin/users/{id}/reset-credential", h.requireSession(h.requireAdminMFAVerified(h.requireCSRF(h.handleAdminResetCredential))))
 }
 
 // --- response/request shapes -------------------------------------------

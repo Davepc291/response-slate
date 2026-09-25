@@ -26,6 +26,17 @@ const SessionCookieName = "__Host-gfr_session"
 // check to work at all.
 const CSRFCookieName = "__Host-gfr_csrf"
 
+// MFAEnrollCookieName is the Step 9F-3 narrow, short-lived credential that
+// bridges an administrator from "just set a permanent password" to
+// "completed MFA enrollment" (see identityservice's mfa.go package doc
+// comment for why this cannot be the normal session cookie: the existing
+// session machinery never authenticates a non-active account, by design,
+// and this cookie does not change that — it authorizes nothing beyond the
+// MFA enrollment route). It shares the CSRF cookie above rather than
+// defining its own, since only one of the two credentials is ever presented
+// by a given browser at a time.
+const MFAEnrollCookieName = "__Host-gfr_mfa_enroll"
+
 // NewSessionCookie builds the Set-Cookie value for a freshly created
 // session. rawToken is the one-time, plaintext opaque token (never logged,
 // never stored anywhere but this cookie and, as a digest, the sessions
@@ -93,6 +104,50 @@ func ClearCSRFCookie() *http.Cookie {
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	}
+}
+
+// NewMFAEnrollCookie builds the Set-Cookie value for a freshly issued
+// MFA-enrollment bridging credential (Step 9F-3). It carries the identical
+// security attributes as the session cookie (Secure, HttpOnly,
+// SameSite=Strict, __Host--prefixed) — it is just as sensitive as a session
+// token — but under its own distinct name so it can never be confused with,
+// or accepted in place of, a real session by any code that only knows to
+// look for SessionCookieName.
+func NewMFAEnrollCookie(rawToken string, expiresAt time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     MFAEnrollCookieName,
+		Value:    rawToken,
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  expiresAt,
+	}
+}
+
+// ClearMFAEnrollCookie expires the browser's MFA-enrollment cookie, mirroring
+// ClearSessionCookie. Safe to send even when the client never had one set.
+func ClearMFAEnrollCookie() *http.Cookie {
+	return &http.Cookie{
+		Name:     MFAEnrollCookieName,
+		Value:    "",
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	}
+}
+
+// ReadMFAEnrollToken extracts the raw MFA-enrollment bridging token from
+// req, if present.
+func ReadMFAEnrollToken(req *http.Request) (string, bool) {
+	c, err := req.Cookie(MFAEnrollCookieName)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	return c.Value, true
 }
 
 // ReadSessionToken extracts the raw session token from req, if present.

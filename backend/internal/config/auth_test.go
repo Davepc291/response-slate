@@ -115,6 +115,41 @@ func TestAuthNeverLogsSecretsInErrors(t *testing.T) {
 	}
 }
 
+func TestAuthMFAConfigDefaultsEmpty(t *testing.T) {
+	clearAuthEnvExceptTests(t)
+	validAuthEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected valid auth configuration to load, got %v", err)
+	}
+	if cfg.Auth.MFARPID != "" || cfg.Auth.MFARPDisplayName != "" {
+		t.Fatalf("expected MFA config to default empty (unwired), got %+v", cfg.Auth)
+	}
+}
+
+func TestAuthMFAConfigLoadsWhenBothSet(t *testing.T) {
+	clearAuthEnvExceptTests(t)
+	validAuthEnv(t)
+	t.Setenv("GFR_AUTH_MFA_RP_ID", "localhost")
+	t.Setenv("GFR_AUTH_MFA_RP_DISPLAY_NAME", "Greenwich Fire Responder (local)")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected valid MFA configuration to load, got %v", err)
+	}
+	if cfg.Auth.MFARPID != "localhost" || cfg.Auth.MFARPDisplayName != "Greenwich Fire Responder (local)" {
+		t.Fatalf("unexpected MFA config: %+v", cfg.Auth)
+	}
+}
+
+func TestAuthRejectsMFARPIDWithoutDisplayName(t *testing.T) {
+	clearAuthEnvExceptTests(t)
+	validAuthEnv(t)
+	t.Setenv("GFR_AUTH_MFA_RP_ID", "localhost")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("expected an error when GFR_AUTH_MFA_RP_ID is set without GFR_AUTH_MFA_RP_DISPLAY_NAME")
+	}
+}
+
 func containsSubstring(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

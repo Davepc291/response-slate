@@ -133,6 +133,52 @@ describe('MobileAuthSessions', () => {
     fixture.destroy();
   });
 
+  it('does not clear local state or navigate away when the logout call itself fails', () => {
+    const fixture = configure();
+    logout.mockReturnValue(
+      of<AuthResult<StatusResponse>>({
+        ok: false,
+        error: { kind: 'unavailable', message: 'Sign-in is temporarily unavailable.' },
+      }),
+    );
+    const el = fixture.nativeElement as HTMLElement;
+    const signOutButton = Array.from(el.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Log out',
+    );
+    signOutButton?.dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+
+    // A failed server-side logout must never present as a successful
+    // sign-out: the session may still be fully valid and authorized, so
+    // clearing local state or navigating to sign-in here would falsely
+    // tell the user they are signed out.
+    expect(clear).not.toHaveBeenCalled();
+    expect(navigateByUrl).not.toHaveBeenCalled();
+    expect(el.textContent).toContain('Unable to log out right now.');
+    fixture.destroy();
+  });
+
+  it('does not clear local state or navigate away when the logout-everywhere call itself fails', () => {
+    const fixture = configure();
+    logoutAll.mockReturnValue(
+      of<AuthResult<StatusResponse>>({
+        ok: false,
+        error: { kind: 'unavailable', message: 'Sign-in is temporarily unavailable.' },
+      }),
+    );
+    const el = fixture.nativeElement as HTMLElement;
+    const signOutAllButton = Array.from(el.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Log out everywhere',
+    );
+    signOutAllButton?.dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+
+    expect(clear).not.toHaveBeenCalled();
+    expect(navigateByUrl).not.toHaveBeenCalled();
+    expect(el.textContent).toContain('Unable to log out right now.');
+    fixture.destroy();
+  });
+
   it('logs out everywhere and returns to sign-in', () => {
     const fixture = configure();
     logoutAll.mockReturnValue(

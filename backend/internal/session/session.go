@@ -76,7 +76,22 @@ type Session struct {
 	ExpiresAt        time.Time // absolute lifetime ceiling
 	RevokedAt        *time.Time
 	RevocationReason RevocationReason
+	// MFAVerifiedAt is set only when THIS session completed a WebAuthn
+	// authentication ceremony (Step 9F-4, AAX-07). nil (the default for a
+	// newly created session, and for every session created before this
+	// field existed) means not verified; an account's enrolled
+	// mfa_credentials rows are a separate, account-level fact and never
+	// imply this one.
+	MFAVerifiedAt *time.Time
 }
+
+// MFAVerified reports whether this specific session has completed a
+// WebAuthn authentication ceremony. It intentionally has no dependency on
+// whether the session is otherwise Usable: callers must check both,
+// exactly like Usable itself documents needing a separate account-state
+// check — this field only ever means what it says for a session that is
+// already known to be Usable.
+func (s Session) MFAVerified() bool { return s.MFAVerifiedAt != nil }
 
 // Config is the caller-supplied idle/absolute timeout policy (Section 8:
 // "exact values are an unresolved question"). This package assumes no

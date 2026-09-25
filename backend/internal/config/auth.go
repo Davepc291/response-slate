@@ -106,6 +106,15 @@ func loadAuth(o *authconfig.Options) error {
 		o.BreachCheckEnabled = b
 	}
 
+	// Step 9F-6: both empty (the default) leaves MFA exactly as unwired as
+	// before — see authconfig.Options.MFARPID's doc comment.
+	if v := strings.TrimSpace(os.Getenv("GFR_AUTH_MFA_RP_ID")); v != "" {
+		o.MFARPID = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GFR_AUTH_MFA_RP_DISPLAY_NAME")); v != "" {
+		o.MFARPDisplayName = v
+	}
+
 	if err := o.Validate(); err != nil {
 		return err
 	}
