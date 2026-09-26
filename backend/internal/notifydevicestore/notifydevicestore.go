@@ -13,9 +13,9 @@
 // handler, no route, no provider SDK, no notification-sending code, and
 // reads no GFR_NOTIFY_* environment variable.
 //
-// Only Register and Get are implemented so far (Step 8D-B Part 3, slices 1
-// and 2A). Replace, Revoke, and ListActive are deliberately not implemented
-// yet.
+// Only Register, Get, and Replace are implemented so far (Step 8D-B Part 3,
+// slices 1, 2A, and 2B). Revoke and ListActive are deliberately not
+// implemented yet.
 package notifydevicestore
 
 import (
@@ -48,7 +48,16 @@ var (
 	// a different user already actively holds (Section 6: "rejected...as a
 	// possible cross-user registration attempt"). See Register's own doc
 	// comment for exactly how this is derived from the database response.
+	// Replace also returns this for an endpoint already actively held by any
+	// other registration -- including another of the caller's own devices.
 	ErrForbidden = errors.New("notifydevicestore: registration belongs to a different user")
+	// ErrNotFound marks a DeviceID Replace has no active registration for:
+	// never created, already revoked, or already superseded. It never
+	// distinguishes those cases to a caller outside this package, mirroring
+	// notifydevices.Store.Replace's own identical collapsing (Section 6),
+	// so a caller cannot use response shape alone to learn whether an id
+	// ever existed.
+	ErrNotFound = errors.New("notifydevicestore: registration not found")
 	// ErrUnavailable marks a database failure. Callers must fail closed.
 	ErrUnavailable = errors.New("notifydevicestore: database unavailable")
 )
@@ -64,16 +73,29 @@ var (
 // anomaly -- a raw corruption detail is not something to expose either.
 var errCorruptSubscription = errors.New("notifydevicestore: stored subscription key material failed re-validation")
 
-// Querier is the minimal pgx surface this package needs so far: Register is
-// a single atomic statement, so nothing beyond QueryRow is required. A real
-// *pgxpool.Pool satisfies it; tests use a fake.
+// Querier is the minimal pgx surface Register/Get need: both are single
+// atomic statements, so nothing beyond QueryRow is required for them.
 type Querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// Pool additionally supports starting a transaction, which Replace needs
+// (it is not a single atomic statement: it reads the old row, and then
+// either updates it in place or inserts a fresh row and revokes the old
+// one, and none of that may be visible unless every step succeeds). A real
+// *pgxpool.Pool satisfies it directly; tests use a fake. Begin returns the
+// full pgx.Tx, matching identitystore's own identical Pool interface,
+// because that is the literal return type *pgxpool.Pool.Begin already has
+// -- narrowing it to a smaller interface here would stop a real pool from
+// satisfying Pool at all.
+type Pool interface {
+	Querier
+	Begin(context.Context) (pgx.Tx, error)
+}
+
 // Postgres is the PostgreSQL-backed store for notification_devices.
 // Construct with Open, or by setting DB directly in a test.
-type Postgres struct{ DB Querier }
+type Postgres struct{ DB Pool }
 
 // Open connects to a local-development PostgreSQL instance only, mirroring
 // the existing alertstore/identitystore/transcriptreview hardened Open
@@ -251,6 +273,151 @@ func (p *Postgres) Register(ctx context.Context, now time.Time, userID identity.
 		return notifydevices.Registration{}, safeDB(err)
 	}
 	return reg, nil
+}
+
+// rollback is a best-effort cleanup helper for the "defer rollback(tx)
+// unless already committed" pattern this package shares with identitystore:
+// after a successful Commit, Rollback on an already-closed transaction is
+// safe to call and simply reports (and here, discards) an
+// already-closed-transaction error.
+func rollback(tx pgx.Tx) {
+	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = tx.Rollback(cleanup)
+}
+
+// Replace supersedes an existing, caller-owned, still-active registration
+// with a freshly validated subscription, preserving
+// notifydevices.Store.Replace's own already-approved semantics exactly
+// (Section 6: "device replacement... supersedes the prior row for that
+// logical device; it does not silently duplicate delivery"):
+//
+//   - oldID must exist and currently be active, or this fails closed with
+//     ErrNotFound. An unknown id and an already-revoked/superseded id are
+//     deliberately indistinguishable here, exactly like the in-memory
+//     Store: the query itself only ever locates a row matching
+//     "revoked_at IS NULL", so a revoked row simply isn't found, the same
+//     as a nonexistent one.
+//   - oldID must belong to userID, or this fails closed with ErrForbidden,
+//     checked only after the row is found (so a caller can never
+//     distinguish "wrong owner" from "not found" by timing alone within
+//     this call, only by the two distinct returned errors, matching the
+//     in-memory Store's own two-error vocabulary for this method).
+//   - If sub's endpoint is unchanged from the old row's current endpoint,
+//     this is an idempotent update of that same row -- identical DeviceID,
+//     no new row, no supersession.
+//   - Otherwise, the new endpoint must not already be actively held by any
+//     other registration -- including one owned by the caller's own other
+//     device -- or this fails closed with ErrForbidden; allowing that would
+//     leave two simultaneously active rows bound to one endpoint.
+//   - On a real replacement, a fresh active row is created and the old row
+//     is atomically marked revoked and superseded by it.
+//
+// Every step runs inside one transaction with the old row (and, when
+// relevant, the conflicting-endpoint row) locked via SELECT ... FOR UPDATE,
+// so a concurrent Replace/Register racing the same rows serializes rather
+// than corrupting state; any failure at any step rolls back the entire
+// transaction via the deferred rollback(tx), leaving no partial mutation --
+// neither a half-created fresh row nor a revoked-without-a-successor old
+// row.
+func (p *Postgres) Replace(ctx context.Context, now time.Time, userID identity.UserID, oldID notifydevices.DeviceID, sub notifydevices.Subscription, platform string) (notifydevices.Registration, error) {
+	if p == nil || p.DB == nil {
+		return notifydevices.Registration{}, ErrUnavailable
+	}
+	if userID <= 0 || oldID <= 0 || now.IsZero() {
+		return notifydevices.Registration{}, ErrInput
+	}
+	if err := sub.Validate(); err != nil {
+		return notifydevices.Registration{}, ErrInput
+	}
+	if err := validatePlatform(platform); err != nil {
+		return notifydevices.Registration{}, ErrInput
+	}
+	p256dh, err := decodeSubscriptionKey(sub.Keys.P256dh)
+	if err != nil {
+		return notifydevices.Registration{}, ErrInput
+	}
+	auth, err := decodeSubscriptionKey(sub.Keys.Auth)
+	if err != nil {
+		return notifydevices.Registration{}, ErrInput
+	}
+
+	tx, err := p.DB.Begin(ctx)
+	if err != nil {
+		return notifydevices.Registration{}, ErrUnavailable
+	}
+	defer rollback(tx)
+
+	oldRow := tx.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+        FROM notification_devices WHERE id = $1 AND revoked_at IS NULL FOR UPDATE`, int64(oldID))
+	old, err := scanRegistration(oldRow)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifydevices.Registration{}, ErrNotFound
+		}
+		if errors.Is(err, errCorruptSubscription) {
+			return notifydevices.Registration{}, ErrUnavailable
+		}
+		return notifydevices.Registration{}, safeDB(err)
+	}
+	if old.UserID != userID {
+		return notifydevices.Registration{}, ErrForbidden
+	}
+
+	var platformArg *string
+	if platform != "" {
+		platformArg = &platform
+	}
+
+	if sub.Endpoint == old.Subscription.Endpoint {
+		row := tx.QueryRow(ctx, `UPDATE notification_devices SET p256dh = $1, auth = $2, platform = $3, updated_at = $4
+            WHERE id = $5
+            RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by`,
+			p256dh, auth, platformArg, now, int64(oldID))
+		updated, err := scanRegistration(row)
+		if err != nil {
+			if errors.Is(err, errCorruptSubscription) {
+				return notifydevices.Registration{}, ErrUnavailable
+			}
+			return notifydevices.Registration{}, safeDB(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return notifydevices.Registration{}, ErrUnavailable
+		}
+		return updated, nil
+	}
+
+	var conflictID int64
+	err = tx.QueryRow(ctx, `SELECT id FROM notification_devices WHERE endpoint = $1 AND revoked_at IS NULL AND id <> $2 FOR UPDATE`,
+		sub.Endpoint, int64(oldID)).Scan(&conflictID)
+	if err == nil {
+		return notifydevices.Registration{}, ErrForbidden
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return notifydevices.Registration{}, safeDB(err)
+	}
+
+	freshRow := tx.QueryRow(ctx, `INSERT INTO notification_devices (user_id, endpoint, p256dh, auth, platform, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $6)
+        RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by`,
+		int64(userID), sub.Endpoint, p256dh, auth, platformArg, now)
+	fresh, err := scanRegistration(freshRow)
+	if err != nil {
+		if errors.Is(err, errCorruptSubscription) {
+			return notifydevices.Registration{}, ErrUnavailable
+		}
+		return notifydevices.Registration{}, safeDB(err)
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE notification_devices SET revoked_at = $1, superseded_by = $2 WHERE id = $3`,
+		now, int64(fresh.ID), int64(oldID)); err != nil {
+		return notifydevices.Registration{}, safeDB(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return notifydevices.Registration{}, ErrUnavailable
+	}
+	return fresh, nil
 }
 
 // Get returns the registration for id regardless of its active or revoked

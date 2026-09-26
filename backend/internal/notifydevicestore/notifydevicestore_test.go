@@ -78,6 +78,94 @@ func (q *fakeQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.R
 	return q.row
 }
 
+// Begin exists only so *fakeQuerier satisfies Pool for Register/Get's own
+// tests, none of which ever call it: it fails loudly rather than silently
+// misbehaving if a future test path unexpectedly reaches it.
+func (q *fakeQuerier) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("fakeQuerier: Begin not supported; use fakePool for a transactional test")
+}
+
+// fakeIDRow implements pgx.Row over a single int64 column, matching
+// Replace's own endpoint-conflict-check query shape (SELECT id FROM ...).
+type fakeIDRow struct {
+	id  int64
+	err error
+}
+
+func (r fakeIDRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[0].(*int64) = r.id
+	return nil
+}
+
+// fakeTx is a minimal, sequence-driven fake of pgx.Tx. Replace makes its
+// QueryRow/Exec calls in a fixed, known order, so this fake just returns
+// each pre-programmed response in turn from rows, and reports execErr from
+// the (at most one) Exec call. Only the small subset of pgx.Tx that Replace
+// actually calls (QueryRow, Exec, Commit, Rollback) has real behavior;
+// every other method exists solely to satisfy the interface and panics if
+// ever reached, so a test fails loudly -- not silently -- if Replace's
+// control flow ever changes to need one of them.
+type fakeTx struct {
+	rows            []pgx.Row
+	queryIndex      int
+	execErr         error
+	execCalled      bool
+	commitErr       error
+	commitErrCalled bool
+	rollbackCalled  bool
+}
+
+func (tx *fakeTx) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+	row := tx.rows[tx.queryIndex]
+	tx.queryIndex++
+	return row
+}
+func (tx *fakeTx) Exec(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+	tx.execCalled = true
+	return pgconn.CommandTag{}, tx.execErr
+}
+func (tx *fakeTx) Commit(context.Context) error { tx.commitErrCalled = true; return tx.commitErr }
+func (tx *fakeTx) Rollback(context.Context) error {
+	tx.rollbackCalled = true
+	return nil
+}
+func (tx *fakeTx) Begin(context.Context) (pgx.Tx, error) { panic("fakeTx: Begin not supported") }
+func (tx *fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	panic("fakeTx: CopyFrom not supported")
+}
+func (tx *fakeTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults {
+	panic("fakeTx: SendBatch not supported")
+}
+func (tx *fakeTx) LargeObjects() pgx.LargeObjects { panic("fakeTx: LargeObjects not supported") }
+func (tx *fakeTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	panic("fakeTx: Prepare not supported")
+}
+func (tx *fakeTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("fakeTx: Query not supported")
+}
+func (tx *fakeTx) Conn() *pgx.Conn { panic("fakeTx: Conn not supported") }
+
+// fakePool provides Begin for Replace's own tests, returning a
+// pre-configured *fakeTx (or beginErr, to test Begin itself failing).
+// QueryRow is never expected to be called directly on fakePool by Replace
+// (only via the transaction it begins), so it is left unimplemented here
+// beyond satisfying Querier trivially through embedding.
+type fakePool struct {
+	fakeQuerier
+	tx       *fakeTx
+	beginErr error
+}
+
+func (p *fakePool) Begin(context.Context) (pgx.Tx, error) {
+	if p.beginErr != nil {
+		return nil, p.beginErr
+	}
+	return p.tx, nil
+}
+
 func rawP256dh() []byte {
 	b := make([]byte, 65)
 	b[0] = 0x04
@@ -400,3 +488,220 @@ func TestGetRejectsCorruptStoredKeyMaterial(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// Replace unit tests. Every pre-Begin validation failure uses the plain
+// fakeQuerier (proving Begin is never even attempted); every transactional
+// scenario uses fakePool/fakeTx, whose QueryRow calls are consumed in the
+// exact fixed order Replace's own doc comment describes. The deeper,
+// real-schema guarantees these mocks can't prove on their own (the actual
+// partial unique index, actual FK/CHECK enforcement, actual physical
+// rollback of a failed multi-statement transaction) are covered by
+// TestLiveNotificationDeviceReplaceRollsBack instead, exactly mirroring how
+// identitystore's own equally-shaped transactional methods (EnrollMFACredential,
+// RevokeAllSessionsForUser) have no fake-based unit tests at all, only live
+// integration coverage -- this package goes further by unit-testing the
+// mockable control-flow layer, but still leans on the live test for the
+// database-native guarantees a mock cannot honestly stand in for.
+
+func TestReplaceUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.Replace(context.Background(), time.Now(), 1, 1, validSubscription(), ""); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestReplaceRejectsInvalidInputBeforeBegin(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name     string
+		userID   identity.UserID
+		oldID    notifydevices.DeviceID
+		sub      notifydevices.Subscription
+		platform string
+		now      time.Time
+	}{
+		{"zero user id", 0, 1, validSubscription(), "", now},
+		{"negative user id", -1, 1, validSubscription(), "", now},
+		{"zero old id", 1, 0, validSubscription(), "", now},
+		{"negative old id", 1, -1, validSubscription(), "", now},
+		{"zero time", 1, 1, validSubscription(), "", time.Time{}},
+		{"invalid subscription", 1, 1, notifydevices.Subscription{}, "", now},
+		{"invalid platform", 1, 1, validSubscription(), "bad<platform>", now},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := &fakeQuerier{}
+			p := &Postgres{DB: q}
+			if _, err := p.Replace(context.Background(), c.now, c.userID, c.oldID, c.sub, c.platform); err != ErrInput {
+				t.Fatalf("expected ErrInput, got %v", err)
+			}
+			if q.sql != "" {
+				t.Fatal("invalid input must never reach Begin/the database")
+			}
+		})
+	}
+}
+
+func TestReplaceBeginFailureFailsClosed(t *testing.T) {
+	pool := &fakePool{beginErr: errors.New("connection refused")}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), time.Now(), 1, 1, validSubscription(), ""); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestReplaceNonexistentOrAlreadyRevokedOldIDReturnsNotFound(t *testing.T) {
+	// The lookup query itself filters WHERE revoked_at IS NULL, so a
+	// nonexistent id and an already-revoked/superseded id are structurally
+	// indistinguishable at the database level -- both simply produce zero
+	// rows, exactly matching notifydevices.Store.Replace's own collapsing.
+	tx := &fakeTx{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), time.Now(), 1, 999, validSubscription(), ""); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if !tx.rollbackCalled {
+		t.Fatal("expected the transaction to be rolled back")
+	}
+	if tx.commitErrCalled {
+		t.Fatal("expected Commit to never be called on a not-found old id")
+	}
+}
+
+func TestReplaceRejectsWrongOwner(t *testing.T) {
+	now := time.Now()
+	tx := &fakeTx{rows: []pgx.Row{fakeRow{
+		id: 5, userID: 2 /* different from caller */, endpoint: "https://push.example.com/send/other",
+		p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now,
+	}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), now, 1, 5, validSubscription(), ""); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+	if !tx.rollbackCalled || tx.commitErrCalled || tx.execCalled {
+		t.Fatal("expected no mutation and a rollback for a wrong-owner rejection")
+	}
+}
+
+func TestReplaceSameEndpointIsIdempotent(t *testing.T) {
+	now := time.Now()
+	sub := validSubscription()
+	tx := &fakeTx{rows: []pgx.Row{
+		fakeRow{id: 5, userID: 1, endpoint: sub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+		fakeRow{id: 5, userID: 1, endpoint: sub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), platform: strPtr("ios-safari"), createdAt: now, updatedAt: now.Add(time.Minute)},
+	}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	reg, err := p.Replace(context.Background(), now.Add(time.Minute), 1, 5, sub, "ios-safari")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reg.ID != 5 {
+		t.Fatalf("expected the same DeviceID for a same-endpoint replace, got %v", reg.ID)
+	}
+	if reg.Platform != "ios-safari" {
+		t.Fatalf("expected the platform hint to refresh, got %q", reg.Platform)
+	}
+	if tx.execCalled {
+		t.Fatal("expected no Exec call for the idempotent same-endpoint path (no old row to separately revoke)")
+	}
+	if !tx.commitErrCalled {
+		t.Fatal("expected Commit to be called")
+	}
+}
+
+func TestReplaceEndpointAlreadyActiveIsForbidden(t *testing.T) {
+	// Deliberately does not distinguish "owned by a different user" from
+	// "owned by another of the caller's own devices": Replace's own doc
+	// comment requires rejecting both identically, and the conflict-check
+	// query never even reads the conflicting row's owner, so a single test
+	// shape covers both real-world scenarios.
+	now := time.Now()
+	oldSub := notifydevices.Subscription{Endpoint: "https://push.example.com/send/old", Keys: notifydevices.Keys{P256dh: validP256dh(), Auth: validAuth()}}
+	newSub := validSubscription() // a different endpoint than oldSub
+	tx := &fakeTx{rows: []pgx.Row{
+		fakeRow{id: 5, userID: 1, endpoint: oldSub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+		fakeIDRow{id: 9}, // some other active row already holds newSub.Endpoint
+	}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), now, 1, 5, newSub, ""); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+	if !tx.rollbackCalled || tx.commitErrCalled || tx.execCalled {
+		t.Fatal("expected no mutation and a rollback for an already-actively-held endpoint")
+	}
+}
+
+func TestReplaceSuccessfulReplacementCreatesFreshRowAndSupersedesOld(t *testing.T) {
+	now := time.Now()
+	oldSub := notifydevices.Subscription{Endpoint: "https://push.example.com/send/old", Keys: notifydevices.Keys{P256dh: validP256dh(), Auth: validAuth()}}
+	newSub := validSubscription()
+	tx := &fakeTx{rows: []pgx.Row{
+		fakeRow{id: 5, userID: 1, endpoint: oldSub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+		fakeIDRow{err: pgx.ErrNoRows}, // no conflicting active row at the new endpoint
+		fakeRow{id: 6, userID: 1, endpoint: newSub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+	}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	fresh, err := p.Replace(context.Background(), now, 1, 5, newSub, "android-chrome")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fresh.ID != 6 {
+		t.Fatalf("expected a new DeviceID distinct from the old one, got %v", fresh.ID)
+	}
+	if fresh.Subscription.Endpoint != newSub.Endpoint {
+		t.Fatalf("expected the fresh row to carry the new endpoint, got %q", fresh.Subscription.Endpoint)
+	}
+	if !tx.execCalled {
+		t.Fatal("expected the old row to be revoked/superseded via Exec")
+	}
+	if !tx.commitErrCalled {
+		t.Fatal("expected Commit to be called")
+	}
+}
+
+func TestReplaceNoPartialMutationWhenFinalExecFails(t *testing.T) {
+	now := time.Now()
+	oldSub := notifydevices.Subscription{Endpoint: "https://push.example.com/send/old", Keys: notifydevices.Keys{P256dh: validP256dh(), Auth: validAuth()}}
+	newSub := validSubscription()
+	tx := &fakeTx{
+		rows: []pgx.Row{
+			fakeRow{id: 5, userID: 1, endpoint: oldSub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+			fakeIDRow{err: pgx.ErrNoRows},
+			fakeRow{id: 6, userID: 1, endpoint: newSub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+		},
+		execErr: errors.New("connection reset while revoking the old row"),
+	}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), now, 1, 5, newSub, ""); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+	if tx.commitErrCalled {
+		t.Fatal("expected Commit to never be called when the old-row revoke Exec fails: no partial mutation may be visible")
+	}
+	if !tx.rollbackCalled {
+		t.Fatal("expected the transaction to be rolled back")
+	}
+}
+
+func TestReplaceCommitFailureFailsClosed(t *testing.T) {
+	now := time.Now()
+	sub := validSubscription()
+	tx := &fakeTx{
+		rows: []pgx.Row{
+			fakeRow{id: 5, userID: 1, endpoint: sub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+			fakeRow{id: 5, userID: 1, endpoint: sub.Endpoint, p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now},
+		},
+		commitErr: errors.New("commit failed"),
+	}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if _, err := p.Replace(context.Background(), now, 1, 5, sub, ""); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}

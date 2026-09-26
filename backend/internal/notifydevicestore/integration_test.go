@@ -315,3 +315,190 @@ func TestLiveNotificationDeviceRegisterAfterOwnRevokeRollsBack(t *testing.T) {
 	}
 	rolledBack = true
 }
+
+// TestLiveNotificationDeviceReplaceRollsBack proves the guarantees the fake
+// pgx.Tx-based unit tests can't honestly stand in for: the real partial
+// unique index, the real composite ownership foreign key, and real
+// Postgres-level rollback leaving zero physical trace of a rejected
+// replacement.
+func TestLiveNotificationDeviceReplaceRollsBack(t *testing.T) {
+	if os.Getenv("GFR_NOTIFY_DEVICES_LIVE_TEST") != "true" {
+		t.Skip("explicit local rollback-only database opt-in required (set GFR_NOTIFY_DEVICES_LIVE_TEST=true and GFR_DATABASE_URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, closeDB, err := Open(ctx, os.Getenv("GFR_DATABASE_URL"))
+	if err != nil {
+		t.Fatal("local notification-device-store database unavailable")
+	}
+	defer closeDB()
+	pool := db.DB.(*pgxpool.Pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("test transaction failed")
+	}
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = tx.Rollback(cleanup)
+		}
+	}()
+
+	var migrated bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '000010')`).Scan(&migrated); err != nil || !migrated {
+		t.Fatal("migration 000010 is not applied to this database")
+	}
+
+	var userA, userB int64
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-replace-a@example.com', 'Replace Test A', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userA); err != nil {
+		t.Fatalf("fixture user A insert failed: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-replace-b@example.com', 'Replace Test B', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userB); err != nil {
+		t.Fatalf("fixture user B insert failed: %v", err)
+	}
+
+	p := &Postgres{DB: tx}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	newSub := func(path string) notifydevices.Subscription {
+		raw := make([]byte, 65)
+		raw[0] = 0x04
+		return notifydevices.Subscription{
+			Endpoint: "https://push.example.invalid/replace/" + path,
+			Keys: notifydevices.Keys{
+				P256dh: base64.RawURLEncoding.EncodeToString(raw),
+				Auth:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+			},
+		}
+	}
+
+	// --- Fixtures for the whole test: A owns "orig" and "other-a"; B owns "other-b". ---
+	orig, err := p.Register(ctx, now, identity.UserID(userA), newSub("orig"), "android-chrome")
+	if err != nil {
+		t.Fatalf("fixture registration (orig) failed: %v", err)
+	}
+	otherA, err := p.Register(ctx, now, identity.UserID(userA), newSub("other-a"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (other-a) failed: %v", err)
+	}
+	otherB, err := p.Register(ctx, now, identity.UserID(userB), newSub("other-b"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (other-b) failed: %v", err)
+	}
+
+	// 1. Nonexistent old id.
+	if _, err := p.Replace(ctx, now.Add(time.Minute), identity.UserID(userA), notifydevices.DeviceID(999999999), newSub("nope"), ""); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for a nonexistent old id, got %v", err)
+	}
+
+	// 2. Wrong owner: userB attempts to replace userA's "orig" registration.
+	if _, err := p.Replace(ctx, now.Add(time.Minute), identity.UserID(userB), orig.ID, newSub("stolen"), ""); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden for a wrong-owner replace, got %v", err)
+	}
+	// Confirm zero mutation: orig is still active, untouched, and no
+	// "stolen" endpoint row exists.
+	unchanged, ok, err := p.Get(ctx, orig.ID)
+	if err != nil || !ok {
+		t.Fatalf("expected orig to still exist and be readable, ok=%v err=%v", ok, err)
+	}
+	if !unchanged.Active() || !unchanged.UpdatedAt.Equal(orig.UpdatedAt) {
+		t.Fatalf("expected orig to be completely unchanged after a rejected wrong-owner replace, got %+v", unchanged)
+	}
+	var stolenCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM notification_devices WHERE endpoint = $1`, newSub("stolen").Endpoint).Scan(&stolenCount); err != nil {
+		t.Fatal(err)
+	}
+	if stolenCount != 0 {
+		t.Fatal("expected no row to have been created for a rejected wrong-owner replace")
+	}
+
+	// 3. New endpoint already active for another device of the SAME user
+	// (otherA, owned by userA) must be rejected exactly like a different
+	// user's endpoint would be.
+	if _, err := p.Replace(ctx, now.Add(time.Minute), identity.UserID(userA), orig.ID, otherA.Subscription, ""); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden when replacing onto the caller's own other active endpoint, got %v", err)
+	}
+	unchanged, ok, err = p.Get(ctx, orig.ID)
+	if err != nil || !ok || !unchanged.Active() {
+		t.Fatalf("expected orig to remain active and untouched, ok=%v err=%v reg=%+v", ok, err, unchanged)
+	}
+	otherAUnchanged, ok, err := p.Get(ctx, otherA.ID)
+	if err != nil || !ok || !otherAUnchanged.Active() {
+		t.Fatalf("expected other-a to remain untouched, ok=%v err=%v reg=%+v", ok, err, otherAUnchanged)
+	}
+
+	// 4. New endpoint already active for another user (otherB) must also
+	// be rejected.
+	if _, err := p.Replace(ctx, now.Add(time.Minute), identity.UserID(userA), orig.ID, otherB.Subscription, ""); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden when replacing onto a different user's active endpoint, got %v", err)
+	}
+
+	// 5. Same-endpoint replace is an idempotent in-place update: same
+	// DeviceID, no supersession.
+	later := now.Add(2 * time.Minute)
+	idempotent, err := p.Replace(ctx, later, identity.UserID(userA), orig.ID, orig.Subscription, "ios-safari")
+	if err != nil {
+		t.Fatalf("idempotent same-endpoint replace failed: %v", err)
+	}
+	if idempotent.ID != orig.ID {
+		t.Fatalf("expected the same DeviceID for a same-endpoint replace, got %v vs %v", idempotent.ID, orig.ID)
+	}
+	if idempotent.Platform != "ios-safari" || idempotent.SupersededBy != 0 || !idempotent.Active() {
+		t.Fatalf("expected an in-place, non-superseded update, got %+v", idempotent)
+	}
+
+	// 6. Successful real replacement: fresh active row, old row revoked and
+	// superseded, correctly linked.
+	replaceAt := now.Add(3 * time.Minute)
+	fresh, err := p.Replace(ctx, replaceAt, identity.UserID(userA), orig.ID, newSub("rotated"), "android-chrome-rotated")
+	if err != nil {
+		t.Fatalf("real replacement failed: %v", err)
+	}
+	if fresh.ID == orig.ID {
+		t.Fatal("expected a fresh DeviceID distinct from the old one")
+	}
+	if !fresh.Active() || fresh.Subscription.Endpoint != newSub("rotated").Endpoint || fresh.Platform != "android-chrome-rotated" {
+		t.Fatalf("unexpected fresh registration: %+v", fresh)
+	}
+	oldAfter, ok, err := p.Get(ctx, orig.ID)
+	if err != nil || !ok {
+		t.Fatalf("expected the old row to still exist (revoked, not deleted), ok=%v err=%v", ok, err)
+	}
+	if oldAfter.Active() {
+		t.Fatal("expected the old row to no longer be active")
+	}
+	if oldAfter.RevokedAt == nil || !oldAfter.RevokedAt.Equal(replaceAt) {
+		t.Fatalf("expected RevokedAt to equal %v, got %v", replaceAt, oldAfter.RevokedAt)
+	}
+	if oldAfter.SupersededBy != fresh.ID {
+		t.Fatalf("expected SupersededBy to reference %v, got %v", fresh.ID, oldAfter.SupersededBy)
+	}
+	var activeForOrigEndpoint int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM notification_devices WHERE endpoint = $1 AND revoked_at IS NULL`, orig.Subscription.Endpoint).
+		Scan(&activeForOrigEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if activeForOrigEndpoint != 0 {
+		t.Fatal("expected the old endpoint to have no active registration left")
+	}
+
+	// 7. Replacing an already-superseded/revoked old id (orig, just revoked
+	// in step 6) now fails as not-found, same as any other revoked row.
+	if _, err := p.Replace(ctx, replaceAt.Add(time.Minute), identity.UserID(userA), orig.ID, newSub("too-late"), ""); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound when replacing an already-revoked/superseded old id, got %v", err)
+	}
+
+	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+	defer c()
+	if err := tx.Rollback(cleanup); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	rolledBack = true
+}
