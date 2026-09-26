@@ -13,8 +13,9 @@
 // handler, no route, no provider SDK, no notification-sending code, and
 // reads no GFR_NOTIFY_* environment variable.
 //
-// Only Register is implemented so far (Step 8D-B Part 3's first slice). Get,
-// Replace, Revoke, and ListActive are deliberately not implemented yet.
+// Only Register and Get are implemented so far (Step 8D-B Part 3, slices 1
+// and 2A). Replace, Revoke, and ListActive are deliberately not implemented
+// yet.
 package notifydevicestore
 
 import (
@@ -51,6 +52,17 @@ var (
 	// ErrUnavailable marks a database failure. Callers must fail closed.
 	ErrUnavailable = errors.New("notifydevicestore: database unavailable")
 )
+
+// errCorruptSubscription marks a scanned row whose stored p256dh/auth no
+// longer decodes to a structurally valid Web Push subscription (Section 4.1
+// key sizes) -- something the schema's own bytea-length CHECK constraints
+// should make unreachable through this package's own write path, but a read
+// must never silently hand back data it cannot itself vouch for. This is
+// deliberately unexported and never returned to a caller directly: every
+// caller (Register, Get) fails closed with the generic ErrUnavailable
+// instead, exactly as safeDB already does for every other database
+// anomaly -- a raw corruption detail is not something to expose either.
+var errCorruptSubscription = errors.New("notifydevicestore: stored subscription key material failed re-validation")
 
 // Querier is the minimal pgx surface this package needs so far: Register is
 // a single atomic statement, so nothing beyond QueryRow is required. A real
@@ -233,15 +245,57 @@ func (p *Postgres) Register(ctx context.Context, now time.Time, userID identity.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return notifydevices.Registration{}, ErrForbidden
 		}
+		if errors.Is(err, errCorruptSubscription) {
+			return notifydevices.Registration{}, ErrUnavailable
+		}
 		return notifydevices.Registration{}, safeDB(err)
 	}
 	return reg, nil
 }
 
-// scanRegistration reads exactly the column list Register's own RETURNING
-// clause produces, re-encoding the stored bytea p256dh/auth values back to
-// base64url text so the result is a normal, immediately-usable
-// notifydevices.Registration/Subscription value.
+// Get returns the registration for id regardless of its active or revoked
+// state: Get is an id lookup/history operation, never an active-only
+// filter (that distinction belongs to a future ListActive). ok is false
+// with a nil error exactly when no row exists for id -- mirroring
+// notifydevices.Store.Get's own (Registration, bool) shape, extended with
+// an error return since this database-backed variant can also fail on
+// unavailability, which the in-memory store never can.
+func (p *Postgres) Get(ctx context.Context, id notifydevices.DeviceID) (notifydevices.Registration, bool, error) {
+	if p == nil || p.DB == nil {
+		return notifydevices.Registration{}, false, ErrUnavailable
+	}
+	if id <= 0 {
+		return notifydevices.Registration{}, false, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+        FROM notification_devices WHERE id = $1`, int64(id))
+
+	reg, err := scanRegistration(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifydevices.Registration{}, false, nil
+		}
+		if errors.Is(err, errCorruptSubscription) {
+			return notifydevices.Registration{}, false, ErrUnavailable
+		}
+		return notifydevices.Registration{}, false, safeDB(err)
+	}
+	return reg, true, nil
+}
+
+// scanRegistration reads exactly the column list both Register's RETURNING
+// clause and Get's SELECT produce, re-encoding the stored bytea p256dh/auth
+// values back to base64url text so the result is a normal,
+// immediately-usable notifydevices.Registration/Subscription value.
+// Re-validating that reconstructed Subscription (rather than trusting the
+// bytea CHECK constraints alone) is deliberate defense in depth: a write
+// through this package can never produce an invalid one, but a read must
+// never silently hand back key material it cannot itself vouch for,
+// regardless of how it got into the row. Shared by every caller that reads
+// a notification_devices row back (Register today; Replace/Revoke/
+// ListActive will reuse it too), so this guarantee is uniform rather than
+// re-implemented per method.
 func scanRegistration(row pgx.Row) (notifydevices.Registration, error) {
 	var (
 		id, userID           int64
@@ -274,6 +328,9 @@ func scanRegistration(row pgx.Row) (notifydevices.Registration, error) {
 	}
 	if supersededBy != nil {
 		reg.SupersededBy = notifydevices.DeviceID(*supersededBy)
+	}
+	if err := reg.Subscription.Validate(); err != nil {
+		return notifydevices.Registration{}, errCorruptSubscription
 	}
 	return reg, nil
 }

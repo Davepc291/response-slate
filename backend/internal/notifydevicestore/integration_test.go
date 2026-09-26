@@ -162,6 +162,61 @@ func TestLiveNotificationDeviceRegisterRollsBack(t *testing.T) {
 		t.Fatal("expected the fresh registration to be active")
 	}
 
+	// 6. Get round-trips an active registration end to end, including the
+	// exact canonical base64url keys, against the real schema (not just the
+	// fake row Register's own unit tests use).
+	gotThird, ok, err := p.Get(ctx, third.ID)
+	if err != nil {
+		t.Fatalf("Get failed against a real database: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for an existing, active registration")
+	}
+	if gotThird.ID != third.ID || gotThird.UserID != identity.UserID(userB) || gotThird.Subscription.Endpoint != sub.Endpoint {
+		t.Fatalf("unexpected identity/endpoint fields: %+v", gotThird)
+	}
+	if gotThird.Subscription.Keys.P256dh != sub.Keys.P256dh || gotThird.Subscription.Keys.Auth != sub.Keys.Auth {
+		t.Fatalf("expected Get's keys to canonically match the original subscription: %+v", gotThird.Subscription.Keys)
+	}
+	if !gotThird.Active() || gotThird.RevokedAt != nil || gotThird.SupersededBy != 0 {
+		t.Fatalf("expected an active, non-superseded registration, got %+v", gotThird)
+	}
+
+	// 7. Get does not hide a revoked registration (first was revoked in step
+	// 5). Also set superseded_by directly via SQL (Replace itself is not
+	// implemented yet) to prove that field round-trips too.
+	if _, err := tx.Exec(ctx, `UPDATE notification_devices SET superseded_by = $1 WHERE id = $2`, int64(third.ID), int64(first.ID)); err != nil {
+		t.Fatalf("fixture superseded_by update failed: %v", err)
+	}
+	gotFirst, ok, err := p.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("Get failed against a real database: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true: a revoked registration must still be retrievable by id, not hidden as not-found")
+	}
+	if gotFirst.Active() {
+		t.Fatal("expected the returned registration to reflect its revoked state")
+	}
+	if gotFirst.RevokedAt == nil {
+		t.Fatal("expected RevokedAt to be set")
+	}
+	if gotFirst.SupersededBy != third.ID {
+		t.Fatalf("expected SupersededBy to round-trip as %v, got %v", third.ID, gotFirst.SupersededBy)
+	}
+	if gotFirst.Platform != "android-chrome-updated" {
+		t.Fatalf("expected the platform hint from step 3 to round-trip, got %q", gotFirst.Platform)
+	}
+
+	// 8. A nonexistent DeviceID returns ok=false with a nil error.
+	_, ok, err = p.Get(ctx, notifydevices.DeviceID(999999999))
+	if err != nil {
+		t.Fatalf("expected a nil error for a nonexistent id, got %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for a nonexistent id")
+	}
+
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
 	defer c()
 	if err := tx.Rollback(cleanup); err != nil {

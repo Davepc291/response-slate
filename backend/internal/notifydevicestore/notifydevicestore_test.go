@@ -269,3 +269,134 @@ func TestRegisterSQLInjectionShapedEndpointNeverReachesQueryText(t *testing.T) {
 		t.Fatal("endpoint value leaked into query text instead of traveling as a bound parameter")
 	}
 }
+
+func TestGetUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, _, err := p.Get(context.Background(), 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestGetRejectsInvalidID(t *testing.T) {
+	for _, id := range []notifydevices.DeviceID{0, -1} {
+		q := &fakeQuerier{}
+		p := &Postgres{DB: q}
+		if _, _, err := p.Get(context.Background(), id); err != ErrInput {
+			t.Fatalf("expected ErrInput for id %v, got %v", id, err)
+		}
+		if q.sql != "" {
+			t.Fatal("an invalid id must never reach the database")
+		}
+	}
+}
+
+func TestGetActiveRegistrationRoundTrips(t *testing.T) {
+	now := time.Now()
+	q := &fakeQuerier{row: fakeRow{
+		id: 7, userID: 3, endpoint: "https://push.example.com/send/abc123",
+		p256dh: rawP256dh(), auth: rawAuth(), platform: strPtr("ios-safari"),
+		createdAt: now, updatedAt: now,
+	}}
+	p := &Postgres{DB: q}
+	reg, ok, err := p.Get(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for an existing row")
+	}
+	if !strings.Contains(q.sql, "FROM notification_devices WHERE id = $1") {
+		t.Fatalf("expected a plain id lookup, got %q", q.sql)
+	}
+	if reg.ID != 7 || reg.UserID != 3 || reg.Platform != "ios-safari" {
+		t.Fatalf("unexpected fields: %+v", reg)
+	}
+	if reg.Subscription.Keys.P256dh != validP256dh() || reg.Subscription.Keys.Auth != validAuth() {
+		t.Fatalf("expected keys re-encoded to canonical base64url: %+v", reg.Subscription.Keys)
+	}
+	if !reg.Active() {
+		t.Fatal("expected an active registration (revoked_at NULL)")
+	}
+	if reg.SupersededBy != 0 {
+		t.Fatalf("expected no supersession, got %v", reg.SupersededBy)
+	}
+}
+
+func TestGetDoesNotHideRevokedRegistration(t *testing.T) {
+	now := time.Now()
+	revokedAt := now.Add(time.Hour)
+	supersededBy := int64(42)
+	q := &fakeQuerier{row: fakeRow{
+		id: 7, userID: 3, endpoint: "https://push.example.com/send/abc123",
+		p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: revokedAt,
+		revokedAt: &revokedAt, supersededBy: &supersededBy,
+	}}
+	p := &Postgres{DB: q}
+	reg, ok, err := p.Get(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true: Get must return a revoked row, never hide it as not-found")
+	}
+	if reg.Active() {
+		t.Fatal("expected the returned registration to reflect its revoked state")
+	}
+	if reg.RevokedAt == nil || !reg.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("expected RevokedAt to round-trip, got %v", reg.RevokedAt)
+	}
+	if reg.SupersededBy != 42 {
+		t.Fatalf("expected SupersededBy to round-trip, got %v", reg.SupersededBy)
+	}
+}
+
+func TestGetNonexistentIDReturnsNotFoundWithoutError(t *testing.T) {
+	q := &fakeQuerier{row: fakeRow{err: pgx.ErrNoRows}}
+	p := &Postgres{DB: q}
+	reg, ok, err := p.Get(context.Background(), 999)
+	if err != nil {
+		t.Fatalf("expected a nil error for a not-found lookup, got %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for a nonexistent id")
+	}
+	if reg != (notifydevices.Registration{}) {
+		t.Fatalf("expected a zero-value Registration on not-found, got %+v", reg)
+	}
+}
+
+func TestGetDatabaseErrorFailsClosed(t *testing.T) {
+	q := &fakeQuerier{row: fakeRow{err: errors.New("connection reset")}}
+	p := &Postgres{DB: q}
+	if _, ok, err := p.Get(context.Background(), 1); err != ErrUnavailable || ok {
+		t.Fatalf("expected (false, ErrUnavailable), got (%v, %v)", ok, err)
+	}
+}
+
+func TestGetRejectsCorruptStoredKeyMaterial(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name         string
+		p256dh, auth []byte
+	}{
+		{"short p256dh", rawP256dh()[:64], rawAuth()},
+		{"long p256dh", append(rawP256dh(), 0x00), rawAuth()},
+		{"short auth", rawP256dh(), rawAuth()[:15]},
+		{"long auth", rawP256dh(), append(rawAuth(), 0x00)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := &fakeQuerier{row: fakeRow{
+				id: 1, userID: 1, endpoint: "https://push.example.com/send/abc123",
+				p256dh: c.p256dh, auth: c.auth, createdAt: now, updatedAt: now,
+			}}
+			p := &Postgres{DB: q}
+			reg, ok, err := p.Get(context.Background(), 1)
+			if err != ErrUnavailable || ok {
+				t.Fatalf("expected corrupt stored key material to fail closed as (false, ErrUnavailable), got (%v, %v, %+v)", ok, err, reg)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
