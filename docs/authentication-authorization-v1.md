@@ -276,11 +276,31 @@ and behavior; it creates none of it now.
 
 ### Proposed exact screen text and controls
 
+**Amendment (2026-09-25):** the production login screen at `/mobile/auth/**`
+does **not** render the `SHADOW / REPLAY — NOT LIVE CAD` /
+`Synthetic replay preview. No operational authority.` warnings, and does not
+carry a second, duplicate product-identity mark in its header — the original
+proposal below is superseded on those two points only. Rationale: those
+warnings and the doubled branding described the non-authenticating
+`/mobile/welcome` prototype and the still-synthetic `/preview` and `/mobile`
+board/mobile experiences; once `/mobile/auth/**` performs real authentication
+against the live API, continuing to badge that specific screen as shadow/
+replay risked a user reading "NOT LIVE CAD" on their actual sign-in screen and
+concluding the credential check itself was fake. The warnings are otherwise
+unchanged and **must** continue to appear, exactly as specified, on
+`/preview` ([BoardPreview](../web/src/app/board-preview)) and on every
+`/mobile/**` synthetic-preview route served by
+[MobileShell](../web/src/app/mobile/mobile-shell) — this amendment narrows
+only the production auth shell
+([MobileAuthShell](../web/src/app/mobile-auth/mobile-auth-shell)), exactly as
+[notification-relay-amendment-v1](notification-relay-amendment-v1.md#1-clauses-superseded)
+superseded four narrow clauses without touching any other prohibition.
+
 | Element | Proposed exact text / control |
 | --- | --- |
-| Product identity | `Greenwich Fire Responder V3` |
-| Warning one (unchanged, every state) | `SHADOW / REPLAY — NOT LIVE CAD` |
-| Warning two (unchanged, every state) | `Synthetic replay preview. No operational authority.` |
+| Product identity | `Greenwich Fire Responder V3` (shown once, via the large sign-in logo — not repeated in a header) |
+| Warning one | Not shown on `/mobile/auth/**` (see amendment above); unchanged elsewhere: `SHADOW / REPLAY — NOT LIVE CAD` |
+| Warning two | Not shown on `/mobile/auth/**` (see amendment above); unchanged elsewhere: `Synthetic replay preview. No operational authority.` |
 | Heading | `Sign in` |
 | Username/email field label | `Email` — a single labeled text input, `type="email"`, `autocomplete="username"`, no placeholder-only label. |
 | Password field label | `Password` — `type="password"` by default, `autocomplete="current-password"`. |
@@ -322,7 +342,7 @@ naming their own invitation:
 
 | State | Required presentation |
 | --- | --- |
-| Loading (initial screen render, or a request in flight) | `Signing in…` on the button; the two warnings remain visible; no skeleton that implies cached protected data. |
+| Loading (initial screen render, or a request in flight) | `Signing in…` on the button; no skeleton that implies cached protected data. (The SHADOW/REPLAY and synthetic-preview warnings do not appear on this screen at all — see the 2026-09-25 amendment above — so there is nothing to keep visible.) |
 | Offline | `Offline. Sign-in requires a network connection. NOT LIVE CAD.`; the sign-in control is disabled rather than allowed to fail silently. |
 | Locked (rate-limited; see [Section 4](#4-password-and-recovery-policy)) | The same generic failure text as any other failure, plus a non-specific `Too many attempts. Try again later.` that does not reveal the exact lockout duration or whether the account itself exists, distinct from but adjacent to the enumeration-resistant default. |
 | Expired invite (user follows an expired invitation link) | `This invitation has expired. Ask your administrator to resend it.` — this is a deliberate, narrow exception to generic error text because the user already possesses a link naming their own pending account; it reveals nothing about any other account. |

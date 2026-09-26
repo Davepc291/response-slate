@@ -8,8 +8,12 @@
   @include forms.screen-base;
 }
 
-.auth-kicker {
-  @include forms.kicker;
+.auth-logo {
+  display: block;
+  align-self: center;
+  width: clamp(220px, 50vw, 320px);
+  height: auto;
+  margin: clamp(1.5rem, 6vh, 3rem) 0 2rem;
 }
 
 h1 {

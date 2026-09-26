@@ -1,15 +1,4 @@
 <div class="mobile-auth-app">
-  <header class="mobile-auth-header">
-    <div class="mobile-auth-identity">
-      <span class="mobile-auth-mode">{{ previewLabel }}</span>
-      <span class="mobile-auth-product">{{ headerTitle }}</span>
-    </div>
-    <div class="mobile-auth-warnings" aria-label="Application status warnings">
-      <p class="mobile-auth-warning mobile-auth-warning-shadow">{{ shadowWarning }}</p>
-      <p class="mobile-auth-warning mobile-auth-warning-synthetic">{{ syntheticWarning }}</p>
-    </div>
-  </header>
-
   @if (loading()) {
     <p class="mobile-auth-loading" role="status">{{ loadingMessage }}</p>
   }

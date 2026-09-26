@@ -4,6 +4,19 @@
     <h1 id="mobile-settings-title" tabindex="-1">Settings</h1>
   </header>
 
+  <section class="settings-card account-card" aria-labelledby="account-title">
+    <h2 id="account-title">Account</h2>
+    @if (logoutError(); as message) {
+      <p class="account-error" role="alert">{{ message }}</p>
+    }
+    <div class="account-actions">
+      <a class="account-link" routerLink="/mobile/auth/sessions">Manage sessions</a>
+      <button type="button" class="logout-button" (click)="logOut()" [disabled]="loggingOut()">
+        {{ loggingOut() ? 'Logging out…' : 'Log out' }}
+      </button>
+    </div>
+  </section>
+
   <section class="settings-card" aria-labelledby="connection-title">
     <h2 id="connection-title">Connection state</h2>
     <p class="connection" [attr.data-online]="online()">
@@ -36,15 +49,6 @@
     <p>
       Update status appears above when needed. A newer build activates only after selecting
       <strong>Reload synthetic preview</strong>.
-    </p>
-  </section>
-
-  <section class="settings-card prototype-exit" aria-labelledby="exit-title">
-    <h2 id="exit-title">Prototype access</h2>
-    <p>Prototype only — no authenticated session exists.</p>
-    <button type="button" (click)="leavePrototype()">Log out of prototype</button>
-    <p class="exit-note">
-      This only returns to the welcome screen. Direct routes and browser Back remain accessible.
     </p>
   </section>
 </section>

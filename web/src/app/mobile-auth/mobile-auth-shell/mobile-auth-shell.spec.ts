@@ -12,18 +12,25 @@ describe('MobileAuthShell', () => {
     });
   });
 
-  it('shows both exact required warnings and a distinguishing real-auth label', () => {
+  it('does not show the synthetic-preview warnings or a duplicate header logo', () => {
     const fixture = TestBed.createComponent(MobileAuthShell);
     fixture.detectChanges();
     const el = fixture.nativeElement as HTMLElement;
 
-    expect(el.textContent).toContain(SHADOW_WARNING);
-    expect(el.textContent).toContain(SYNTHETIC_WARNING);
-    expect(el.textContent).toContain('Greenwich Fire Responder V3');
+    // This is the production sign-in surface, not the synthetic board/mobile
+    // preview: it must not carry SHADOW/REPLAY or synthetic-preview framing,
+    // per docs/authentication-authorization-v1.md Section 3.
+    expect(el.textContent).not.toContain(SHADOW_WARNING);
+    expect(el.textContent).not.toContain(SYNTHETIC_WARNING);
+    expect(el.textContent).not.toContain(
+      'Real authentication preview — connects to the authentication service, not yet the production sign-in.',
+    );
     // Distinguishes itself from MobileShell's synthetic-preview framing.
     expect(el.textContent).not.toContain('Mobile synthetic preview');
     expect(el.textContent).not.toContain('Prototype access — not authentication.');
-    fixture.destroy();
+    // No duplicate header logo — the large logo lives on the sign-in screen itself.
+    expect(el.querySelector('.mobile-auth-logo')).toBeNull();
+    expect(el.querySelector('header')).toBeNull();
   });
 
   it('renders one main landmark for the routed content', () => {

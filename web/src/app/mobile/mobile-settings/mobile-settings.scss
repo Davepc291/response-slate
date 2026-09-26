@@ -87,8 +87,47 @@ dd {
   overflow-wrap: anywhere;
 }
 
-.prototype-exit {
-  border-color: #8e7630;
+.account-card {
+  border-color: #4d6b8a;
+}
+
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.account-link {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.9rem;
+  border: 2px solid #74889c;
+  border-radius: 0.45rem;
+  color: #cfe0f2;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.account-link:focus-visible {
+  outline: 3px solid #8cc6ff;
+  outline-offset: 2px;
+}
+
+.logout-button {
+  border-color: #ff6f75;
+  color: #ffd6d8;
+}
+
+.logout-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.account-error {
+  color: #ff6f75;
+  font-weight: 700;
 }
 
 button {
@@ -105,9 +144,4 @@ button {
 button:focus-visible {
   outline: 3px solid #8cc6ff;
   outline-offset: 2px;
-}
-
-.exit-note {
-  color: #b9c8d6;
-  font-size: 0.78rem;
 }
