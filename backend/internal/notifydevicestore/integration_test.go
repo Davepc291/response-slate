@@ -502,3 +502,153 @@ func TestLiveNotificationDeviceReplaceRollsBack(t *testing.T) {
 	}
 	rolledBack = true
 }
+
+// TestLiveNotificationDeviceRevokeRollsBack proves the guarantees the fake
+// pgx.Tx-based unit tests can't honestly stand in for: the real row lock,
+// real ownership enforcement, and real Postgres-level rollback leaving zero
+// physical trace of a rejected revoke.
+func TestLiveNotificationDeviceRevokeRollsBack(t *testing.T) {
+	if os.Getenv("GFR_NOTIFY_DEVICES_LIVE_TEST") != "true" {
+		t.Skip("explicit local rollback-only database opt-in required (set GFR_NOTIFY_DEVICES_LIVE_TEST=true and GFR_DATABASE_URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, closeDB, err := Open(ctx, os.Getenv("GFR_DATABASE_URL"))
+	if err != nil {
+		t.Fatal("local notification-device-store database unavailable")
+	}
+	defer closeDB()
+	pool := db.DB.(*pgxpool.Pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("test transaction failed")
+	}
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = tx.Rollback(cleanup)
+		}
+	}()
+
+	var migrated bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '000010')`).Scan(&migrated); err != nil || !migrated {
+		t.Fatal("migration 000010 is not applied to this database")
+	}
+
+	var userA, userB int64
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-revoke-a@example.com', 'Revoke Test A', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userA); err != nil {
+		t.Fatalf("fixture user A insert failed: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-revoke-b@example.com', 'Revoke Test B', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userB); err != nil {
+		t.Fatalf("fixture user B insert failed: %v", err)
+	}
+
+	p := &Postgres{DB: tx}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	raw := make([]byte, 65)
+	raw[0] = 0x04
+	sub := notifydevices.Subscription{
+		Endpoint: "https://push.example.invalid/revoke/one",
+		Keys: notifydevices.Keys{
+			P256dh: base64.RawURLEncoding.EncodeToString(raw),
+			Auth:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+		},
+	}
+
+	reg, err := p.Register(ctx, now, identity.UserID(userA), sub, "android-chrome")
+	if err != nil {
+		t.Fatalf("fixture registration failed: %v", err)
+	}
+
+	// 1. Nonexistent DeviceID.
+	if err := p.Revoke(ctx, now.Add(time.Minute), identity.UserID(userA), notifydevices.DeviceID(999999999)); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for a nonexistent id, got %v", err)
+	}
+
+	// 2. Wrong-owner attempt cannot mutate the row.
+	if err := p.Revoke(ctx, now.Add(time.Minute), identity.UserID(userB), reg.ID); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden for a wrong-owner revoke, got %v", err)
+	}
+	unchanged, ok, err := p.Get(ctx, reg.ID)
+	if err != nil || !ok {
+		t.Fatalf("expected the registration to still exist, ok=%v err=%v", ok, err)
+	}
+	if !unchanged.Active() {
+		t.Fatal("expected the registration to remain active after a rejected wrong-owner revoke")
+	}
+
+	// 3. Successful revoke.
+	revokeAt := now.Add(2 * time.Minute)
+	if err := p.Revoke(ctx, revokeAt, identity.UserID(userA), reg.ID); err != nil {
+		t.Fatalf("revoke failed: %v", err)
+	}
+
+	// Get still retrieves the revoked row; Active() is false; revoked_at is
+	// correct; superseded_by remains zero (ordinary revoke, no successor).
+	revoked, ok, err := p.Get(ctx, reg.ID)
+	if err != nil {
+		t.Fatalf("Get failed after revoke: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected Get to still retrieve the revoked registration, not report it as not-found")
+	}
+	if revoked.Active() {
+		t.Fatal("expected Active() to be false after revoke")
+	}
+	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(revokeAt) {
+		t.Fatalf("expected RevokedAt to equal %v, got %v", revokeAt, revoked.RevokedAt)
+	}
+	if revoked.SupersededBy != 0 {
+		t.Fatalf("expected SupersededBy to remain zero for an ordinary revoke, got %v", revoked.SupersededBy)
+	}
+	if revoked.UserID != identity.UserID(userA) || revoked.Subscription.Endpoint != sub.Endpoint {
+		t.Fatalf("expected every other field to be unchanged, got %+v", revoked)
+	}
+
+	// 4. Already-revoked/replayed revoke is idempotent: nil error, and
+	// revoked_at is NOT overwritten with the new timestamp.
+	replayAt := revokeAt.Add(time.Hour)
+	if err := p.Revoke(ctx, replayAt, identity.UserID(userA), reg.ID); err != nil {
+		t.Fatalf("expected a replayed revoke to succeed idempotently, got %v", err)
+	}
+	afterReplay, ok, err := p.Get(ctx, reg.ID)
+	if err != nil || !ok {
+		t.Fatalf("expected the registration to still exist after a replayed revoke, ok=%v err=%v", ok, err)
+	}
+	if afterReplay.RevokedAt == nil || !afterReplay.RevokedAt.Equal(revokeAt) {
+		t.Fatalf("expected RevokedAt to remain the original %v, got %v (a replayed revoke must never overwrite it)", revokeAt, afterReplay.RevokedAt)
+	}
+
+	// 5. A wrong-owner attempt against an already-revoked row is still
+	// rejected as ErrForbidden, not silently treated as idempotent success
+	// -- ownership is checked before the active/already-revoked branch.
+	if err := p.Revoke(ctx, replayAt, identity.UserID(userB), reg.ID); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden for a wrong-owner revoke of an already-revoked row, got %v", err)
+	}
+
+	// 6. No cross-user mutation anywhere in this test: userB's own devices
+	// (there are none registered here) and the row itself remain exactly
+	// as expected.
+	var totalCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM notification_devices WHERE user_id IN ($1, $2)`, userA, userB).Scan(&totalCount); err != nil {
+		t.Fatal(err)
+	}
+	if totalCount != 1 {
+		t.Fatalf("expected exactly the one original registration to exist, got %d rows", totalCount)
+	}
+
+	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+	defer c()
+	if err := tx.Rollback(cleanup); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	rolledBack = true
+}

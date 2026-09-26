@@ -13,8 +13,8 @@
 // handler, no route, no provider SDK, no notification-sending code, and
 // reads no GFR_NOTIFY_* environment variable.
 //
-// Only Register, Get, and Replace are implemented so far (Step 8D-B Part 3,
-// slices 1, 2A, and 2B). Revoke and ListActive are deliberately not
+// Only Register, Get, Replace, and Revoke are implemented so far (Step
+// 8D-B Part 3, slices 1, 2A, 2B, and 2C). ListActive is deliberately not
 // implemented yet.
 package notifydevicestore
 
@@ -418,6 +418,73 @@ func (p *Postgres) Replace(ctx context.Context, now time.Time, userID identity.U
 		return notifydevices.Registration{}, ErrUnavailable
 	}
 	return fresh, nil
+}
+
+// Revoke marks id revoked as of now (Section 8: "Lost device: the
+// user...must be able to revoke a specific device registration without
+// affecting the user's other devices"), preserving
+// notifydevices.Store.Revoke's own already-approved semantics exactly:
+//
+//   - id must exist at all, or this fails closed with ErrNotFound.
+//   - id must belong to userID, or this fails closed with ErrForbidden --
+//     checked before the active/already-revoked distinction below, so a
+//     caller can never revoke, or learn the current state of, a
+//     registration it does not own, active or not.
+//   - Revoking an already-revoked id is idempotent: it returns nil (no
+//     error, no mutation) without changing the row's existing revoked_at.
+//   - Revoking an active, caller-owned id sets revoked_at to now. Ordinary
+//     revocation never sets superseded_by -- that column belongs
+//     exclusively to Replace, for a real device-replacement supersession;
+//     an ordinary revoke has no successor row to point at.
+//
+// The row is locked with SELECT ... FOR UPDATE before any decision is
+// made, and the conditional UPDATE (when one is actually needed) happens
+// in the same transaction, so two callers racing to revoke the same
+// active id serialize deterministically: whichever transaction commits
+// first sets the real revoked_at value; the other's lock acquisition then
+// observes the already-revoked row and takes the same idempotent, no-op
+// success path it would for any other already-revoked id -- never an
+// error, and never a second, overwriting revoked_at.
+func (p *Postgres) Revoke(ctx context.Context, now time.Time, userID identity.UserID, id notifydevices.DeviceID) error {
+	if p == nil || p.DB == nil {
+		return ErrUnavailable
+	}
+	if userID <= 0 || id <= 0 || now.IsZero() {
+		return ErrInput
+	}
+
+	tx, err := p.DB.Begin(ctx)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer rollback(tx)
+
+	var ownerID int64
+	var revokedAt *time.Time
+	row := tx.QueryRow(ctx, `SELECT user_id, revoked_at FROM notification_devices WHERE id = $1 FOR UPDATE`, int64(id))
+	if err := row.Scan(&ownerID, &revokedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return safeDB(err)
+	}
+	if identity.UserID(ownerID) != userID {
+		return ErrForbidden
+	}
+	if revokedAt != nil {
+		// Already revoked: idempotent success, matching
+		// notifydevices.Store.Revoke exactly. No Exec, no Commit -- the
+		// deferred rollback closes this read-only transaction.
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE notification_devices SET revoked_at = $1 WHERE id = $2`, now, int64(id)); err != nil {
+		return safeDB(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ErrUnavailable
+	}
+	return nil
 }
 
 // Get returns the registration for id regardless of its active or revoked

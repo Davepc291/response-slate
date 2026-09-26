@@ -100,6 +100,23 @@ func (r fakeIDRow) Scan(dest ...any) error {
 	return nil
 }
 
+// fakeOwnerRow implements pgx.Row over the (user_id, revoked_at) column
+// pair Revoke's own lookup query shape produces.
+type fakeOwnerRow struct {
+	userID    int64
+	revokedAt *time.Time
+	err       error
+}
+
+func (r fakeOwnerRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[0].(*int64) = r.userID
+	*dest[1].(**time.Time) = r.revokedAt
+	return nil
+}
+
 // fakeTx is a minimal, sequence-driven fake of pgx.Tx. Replace makes its
 // QueryRow/Exec calls in a fixed, known order, so this fake just returns
 // each pre-programmed response in turn from rows, and reports execErr from
@@ -702,6 +719,145 @@ func TestReplaceCommitFailureFailsClosed(t *testing.T) {
 	pool := &fakePool{tx: tx}
 	p := &Postgres{DB: pool}
 	if _, err := p.Replace(context.Background(), now, 1, 5, sub, ""); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+// Revoke unit tests. Same fakeTx/fakePool infrastructure as Replace's own
+// tests: real behavior for QueryRow/Exec/Commit/Rollback, everything else
+// panics if ever reached. The deeper, real-schema guarantees these mocks
+// can't prove (true row locking, real concurrent-revoke serialization) are
+// covered by TestLiveNotificationDeviceRevokeRollsBack and the temporary
+// concurrency probe instead.
+
+func TestRevokeUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestRevokeRejectsInvalidInputBeforeBegin(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name   string
+		userID identity.UserID
+		id     notifydevices.DeviceID
+		now    time.Time
+	}{
+		{"zero user id", 0, 1, now},
+		{"negative user id", -1, 1, now},
+		{"zero device id", 1, 0, now},
+		{"negative device id", 1, -1, now},
+		{"zero time", 1, 1, time.Time{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := &fakeQuerier{}
+			p := &Postgres{DB: q}
+			if err := p.Revoke(context.Background(), c.now, c.userID, c.id); err != ErrInput {
+				t.Fatalf("expected ErrInput, got %v", err)
+			}
+			if q.sql != "" {
+				t.Fatal("invalid input must never reach Begin/the database")
+			}
+		})
+	}
+}
+
+func TestRevokeBeginFailureFailsClosed(t *testing.T) {
+	pool := &fakePool{beginErr: errors.New("connection refused")}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestRevokeNonexistentIDReturnsNotFound(t *testing.T) {
+	tx := &fakeTx{rows: []pgx.Row{fakeOwnerRow{err: pgx.ErrNoRows}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 999); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if !tx.rollbackCalled || tx.commitErrCalled || tx.execCalled {
+		t.Fatal("expected no mutation and a rollback for a nonexistent id")
+	}
+}
+
+func TestRevokeRejectsWrongOwner(t *testing.T) {
+	tx := &fakeTx{rows: []pgx.Row{fakeOwnerRow{userID: 2 /* different from caller */}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 5); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+	if !tx.rollbackCalled || tx.commitErrCalled || tx.execCalled {
+		t.Fatal("expected no mutation and a rollback for a wrong-owner revoke attempt")
+	}
+}
+
+func TestRevokeAlreadyRevokedIsIdempotent(t *testing.T) {
+	existingRevokedAt := time.Now().Add(-time.Hour)
+	tx := &fakeTx{rows: []pgx.Row{fakeOwnerRow{userID: 1, revokedAt: &existingRevokedAt}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 5); err != nil {
+		t.Fatalf("expected nil (idempotent success), got %v", err)
+	}
+	if tx.execCalled {
+		t.Fatal("expected no Exec call for an already-revoked id: revoked_at must never be overwritten")
+	}
+	if tx.commitErrCalled {
+		t.Fatal("expected no Commit call for a no-op idempotent revoke")
+	}
+	if !tx.rollbackCalled {
+		t.Fatal("expected the read-only transaction to be rolled back")
+	}
+}
+
+func TestRevokeActiveRegistrationSucceeds(t *testing.T) {
+	tx := &fakeTx{rows: []pgx.Row{fakeOwnerRow{userID: 1, revokedAt: nil}}}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	now := time.Now()
+	if err := p.Revoke(context.Background(), now, 1, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tx.execCalled {
+		t.Fatal("expected Exec to be called to set revoked_at")
+	}
+	if !tx.commitErrCalled {
+		t.Fatal("expected Commit to be called")
+	}
+}
+
+func TestRevokeExecFailureFailsClosed(t *testing.T) {
+	tx := &fakeTx{
+		rows:    []pgx.Row{fakeOwnerRow{userID: 1, revokedAt: nil}},
+		execErr: errors.New("connection reset"),
+	}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 5); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+	if tx.commitErrCalled {
+		t.Fatal("expected Commit to never be called when the revoke Exec fails")
+	}
+	if !tx.rollbackCalled {
+		t.Fatal("expected the transaction to be rolled back")
+	}
+}
+
+func TestRevokeCommitFailureFailsClosed(t *testing.T) {
+	tx := &fakeTx{
+		rows:      []pgx.Row{fakeOwnerRow{userID: 1, revokedAt: nil}},
+		commitErr: errors.New("commit failed"),
+	}
+	pool := &fakePool{tx: tx}
+	p := &Postgres{DB: pool}
+	if err := p.Revoke(context.Background(), time.Now(), 1, 5); err != ErrUnavailable {
 		t.Fatalf("expected ErrUnavailable, got %v", err)
 	}
 }
