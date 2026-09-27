@@ -62,14 +62,16 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
-// fakeQuerier captures the exact SQL and arguments passed to QueryRow, so
-// tests can prove every value travels as a bound parameter, never
+// fakeQuerier captures the exact SQL and arguments passed to QueryRow/Query,
+// so tests can prove every value travels as a bound parameter, never
 // interpolated into the query text (mirroring alertstore/postgres_test.go's
 // identical fakeQuerier pattern).
 type fakeQuerier struct {
-	sql  string
-	args []any
-	row  fakeRow
+	sql      string
+	args     []any
+	row      fakeRow
+	rows     *fakeRows
+	queryErr error
 }
 
 func (q *fakeQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
@@ -78,12 +80,53 @@ func (q *fakeQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.R
 	return q.row
 }
 
-// Begin exists only so *fakeQuerier satisfies Pool for Register/Get's own
-// tests, none of which ever call it: it fails loudly rather than silently
-// misbehaving if a future test path unexpectedly reaches it.
+func (q *fakeQuerier) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	q.sql = sql
+	q.args = args
+	if q.queryErr != nil {
+		return nil, q.queryErr
+	}
+	if q.rows == nil {
+		return &fakeRows{}, nil
+	}
+	return q.rows, nil
+}
+
+// Begin exists only so *fakeQuerier satisfies Pool for Register/Get/
+// ListActive's own tests, none of which ever call it: it fails loudly
+// rather than silently misbehaving if a future test path unexpectedly
+// reaches it.
 func (q *fakeQuerier) Begin(context.Context) (pgx.Tx, error) {
 	return nil, errors.New("fakeQuerier: Begin not supported; use fakePool for a transactional test")
 }
+
+// fakeRows implements pgx.Rows over a fixed, ordered slice of pgx.Row
+// values (fakeRow or an error-only fakeRow), matching ListActive's own
+// multi-row query shape. Only Next/Scan/Close/Err have real behavior;
+// every other method exists solely to satisfy the interface and panics if
+// ever reached.
+type fakeRows struct {
+	remaining []pgx.Row
+	err       error
+}
+
+func (r *fakeRows) Next() bool { return len(r.remaining) > 0 }
+func (r *fakeRows) Scan(dest ...any) error {
+	row := r.remaining[0]
+	r.remaining = r.remaining[1:]
+	return row.Scan(dest...)
+}
+func (r *fakeRows) Close()     {}
+func (r *fakeRows) Err() error { return r.err }
+func (r *fakeRows) CommandTag() pgconn.CommandTag {
+	panic("fakeRows: CommandTag not supported")
+}
+func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription {
+	panic("fakeRows: FieldDescriptions not supported")
+}
+func (r *fakeRows) Values() ([]any, error) { panic("fakeRows: Values not supported") }
+func (r *fakeRows) RawValues() [][]byte    { panic("fakeRows: RawValues not supported") }
+func (r *fakeRows) Conn() *pgx.Conn        { panic("fakeRows: Conn not supported") }
 
 // fakeIDRow implements pgx.Row over a single int64 column, matching
 // Replace's own endpoint-conflict-check query shape (SELECT id FROM ...).
@@ -859,5 +902,126 @@ func TestRevokeCommitFailureFailsClosed(t *testing.T) {
 	p := &Postgres{DB: pool}
 	if err := p.Revoke(context.Background(), time.Now(), 1, 5); err != ErrUnavailable {
 		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+// ListActive unit tests.
+
+func TestListActiveUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.ListActive(context.Background(), 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveRejectsInvalidUserIDBeforeQuerying(t *testing.T) {
+	for _, id := range []identity.UserID{0, -1} {
+		q := &fakeQuerier{}
+		p := &Postgres{DB: q}
+		if _, err := p.ListActive(context.Background(), id); err != ErrInput {
+			t.Fatalf("expected ErrInput for user id %v, got %v", id, err)
+		}
+		if q.sql != "" {
+			t.Fatal("an invalid user id must never reach the database")
+		}
+	}
+}
+
+func TestListActiveQueriesOnlyByUserIDAndActiveAndOrdersDeterministically(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{}}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActive(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q.sql, "WHERE user_id = $1 AND revoked_at IS NULL") {
+		t.Fatalf("expected the query to be scoped to user_id and active rows only, got %q", q.sql)
+	}
+	if !strings.Contains(q.sql, "ORDER BY created_at DESC, id DESC") {
+		t.Fatalf("expected deterministic newest-first ordering, got %q", q.sql)
+	}
+	if len(q.args) != 1 || q.args[0] != int64(7) {
+		t.Fatalf("expected exactly one bound user_id argument (7), got %v", q.args)
+	}
+}
+
+func TestListActiveEmptyResultReturnsEmptySliceNilError(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActive(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("expected a nil error, got %v", err)
+	}
+	if regs == nil {
+		t.Fatal("expected a non-nil, empty slice, not a nil slice")
+	}
+	if len(regs) != 0 {
+		t.Fatalf("expected zero results, got %d", len(regs))
+	}
+}
+
+func TestListActiveReturnsMultipleRegistrationsPreservingFieldsAndOrder(t *testing.T) {
+	now := time.Now()
+	later := now.Add(time.Hour)
+	// fakeRows returns rows in the exact order given; this test does not
+	// re-verify the database's own ORDER BY correctness (that belongs to
+	// the live integration test), only that ListActive preserves whatever
+	// order its Query call is given, rather than reordering results itself.
+	newest := fakeRow{id: 2, userID: 1, endpoint: "https://push.example.com/send/newest",
+		p256dh: rawP256dh(), auth: rawAuth(), platform: strPtr("ios-safari"), createdAt: later, updatedAt: later}
+	oldest := fakeRow{id: 1, userID: 1, endpoint: "https://push.example.com/send/oldest",
+		p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now}
+	q := &fakeQuerier{rows: &fakeRows{remaining: []pgx.Row{newest, oldest}}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActive(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(regs) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(regs))
+	}
+	if regs[0].ID != 2 || regs[1].ID != 1 {
+		t.Fatalf("expected the order given by Query to be preserved (newest first), got ids %v, %v", regs[0].ID, regs[1].ID)
+	}
+	if regs[0].Platform != "ios-safari" || regs[1].Platform != "" {
+		t.Fatalf("expected platform hints to round-trip per row, got %+v", regs)
+	}
+	for _, r := range regs {
+		if r.Subscription.Keys.P256dh != validP256dh() || r.Subscription.Keys.Auth != validAuth() {
+			t.Fatalf("expected canonical base64url keys to round-trip, got %+v", r.Subscription.Keys)
+		}
+		if r.UserID != 1 || !r.Active() {
+			t.Fatalf("expected every row to belong to user 1 and be active, got %+v", r)
+		}
+	}
+}
+
+func TestListActiveQueryErrorFailsClosed(t *testing.T) {
+	q := &fakeQuerier{queryErr: errors.New("connection reset")}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActive(context.Background(), 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveRowsErrFailsClosed(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{err: errors.New("connection reset mid-stream")}}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActive(context.Background(), 1); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveRejectsCorruptStoredKeyMaterial(t *testing.T) {
+	now := time.Now()
+	good := fakeRow{id: 1, userID: 1, endpoint: "https://push.example.com/send/a", p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now}
+	corrupt := fakeRow{id: 2, userID: 1, endpoint: "https://push.example.com/send/b", p256dh: rawP256dh()[:64] /* wrong length */, auth: rawAuth(), createdAt: now, updatedAt: now}
+	q := &fakeQuerier{rows: &fakeRows{remaining: []pgx.Row{good, corrupt}}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActive(context.Background(), 1)
+	if err != ErrUnavailable {
+		t.Fatalf("expected corrupt stored key material to fail the whole call closed as ErrUnavailable, got err=%v regs=%+v", err, regs)
+	}
+	if regs != nil {
+		t.Fatalf("expected no partial result on failure, got %+v", regs)
 	}
 }

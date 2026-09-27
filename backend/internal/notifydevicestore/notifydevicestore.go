@@ -13,9 +13,8 @@
 // handler, no route, no provider SDK, no notification-sending code, and
 // reads no GFR_NOTIFY_* environment variable.
 //
-// Only Register, Get, Replace, and Revoke are implemented so far (Step
-// 8D-B Part 3, slices 1, 2A, 2B, and 2C). ListActive is deliberately not
-// implemented yet.
+// Register, Get, Replace, Revoke, and ListActive are all implemented (Step
+// 8D-B Part 3, slices 1, 2A, 2B, 2C, and 2D).
 package notifydevicestore
 
 import (
@@ -77,6 +76,9 @@ var errCorruptSubscription = errors.New("notifydevicestore: stored subscription 
 // atomic statements, so nothing beyond QueryRow is required for them.
 type Querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+	// Query is needed only by ListActive, which returns a variable-length
+	// result set rather than a single row.
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
 // Pool additionally supports starting a transaction, which Replace needs
@@ -516,6 +518,62 @@ func (p *Postgres) Get(ctx context.Context, id notifydevices.DeviceID) (notifyde
 		return notifydevices.Registration{}, false, safeDB(err)
 	}
 	return reg, true, nil
+}
+
+// ListActive returns every currently active (revoked_at IS NULL)
+// registration owned by userID, newest registration first (Section 6: "a
+// user may hold more than one registered device... each is a distinct row,
+// independently revocable"). It never returns a registration belonging to
+// any other user: the query itself is scoped by user_id, not filtered
+// after the fact. A user with no active registrations is not an error --
+// it returns a non-nil, empty slice and a nil error, exactly like
+// notifydevices.Store.ListActive's own in-memory shape, since "no active
+// devices" is a normal, expected state for this method, unlike Get's
+// single-id lookup.
+//
+// Ordering is ORDER BY created_at DESC, id DESC -- the same
+// most-recent-first, id-as-tiebreaker convention already used throughout
+// this schema (for example sessions/invitations history queries), so
+// ordering is deterministic even when two rows share an identical
+// created_at timestamp.
+//
+// A revoke racing concurrently with this call is not a bug either way it
+// lands: reading the pre-revoke snapshot (this query started first) or the
+// post-revoke snapshot (the revoke committed first) are both individually
+// consistent, correctly-scoped results -- what this method must never
+// produce, and does not, is a cross-user row or a malformed one, since
+// every row still passes through the same user_id-scoped WHERE clause and
+// the same scanRegistration validation as every other method.
+func (p *Postgres) ListActive(ctx context.Context, userID identity.UserID) ([]notifydevices.Registration, error) {
+	if p == nil || p.DB == nil {
+		return nil, ErrUnavailable
+	}
+	if userID <= 0 {
+		return nil, ErrInput
+	}
+
+	rows, err := p.DB.Query(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+        FROM notification_devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC, id DESC`, int64(userID))
+	if err != nil {
+		return nil, safeDB(err)
+	}
+	defer rows.Close()
+
+	out := []notifydevices.Registration{}
+	for rows.Next() {
+		reg, err := scanRegistration(rows)
+		if err != nil {
+			if errors.Is(err, errCorruptSubscription) {
+				return nil, ErrUnavailable
+			}
+			return nil, safeDB(err)
+		}
+		out = append(out, reg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, safeDB(err)
+	}
+	return out, nil
 }
 
 // scanRegistration reads exactly the column list both Register's RETURNING

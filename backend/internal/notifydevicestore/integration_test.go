@@ -652,3 +652,158 @@ func TestLiveNotificationDeviceRevokeRollsBack(t *testing.T) {
 	}
 	rolledBack = true
 }
+
+// TestLiveNotificationDeviceListActiveRollsBack proves the guarantees the
+// fake-row unit tests can't honestly stand in for: the real user_id-scoped
+// WHERE clause, the real partial-active filter, and the real ORDER BY
+// evaluated by Postgres itself.
+func TestLiveNotificationDeviceListActiveRollsBack(t *testing.T) {
+	if os.Getenv("GFR_NOTIFY_DEVICES_LIVE_TEST") != "true" {
+		t.Skip("explicit local rollback-only database opt-in required (set GFR_NOTIFY_DEVICES_LIVE_TEST=true and GFR_DATABASE_URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, closeDB, err := Open(ctx, os.Getenv("GFR_DATABASE_URL"))
+	if err != nil {
+		t.Fatal("local notification-device-store database unavailable")
+	}
+	defer closeDB()
+	pool := db.DB.(*pgxpool.Pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("test transaction failed")
+	}
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = tx.Rollback(cleanup)
+		}
+	}()
+
+	var migrated bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '000010')`).Scan(&migrated); err != nil || !migrated {
+		t.Fatal("migration 000010 is not applied to this database")
+	}
+
+	var userA, userB int64
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-listactive-a@example.com', 'ListActive Test A', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userA); err != nil {
+		t.Fatalf("fixture user A insert failed: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-listactive-b@example.com', 'ListActive Test B', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userB); err != nil {
+		t.Fatalf("fixture user B insert failed: %v", err)
+	}
+
+	p := &Postgres{DB: tx}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	newSub := func(path string) notifydevices.Subscription {
+		raw := make([]byte, 65)
+		raw[0] = 0x04
+		return notifydevices.Subscription{
+			Endpoint: "https://push.example.invalid/listactive/" + path,
+			Keys: notifydevices.Keys{
+				P256dh: base64.RawURLEncoding.EncodeToString(raw),
+				Auth:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+			},
+		}
+	}
+
+	// Empty result before any registration exists for userA.
+	empty, err := p.ListActive(ctx, identity.UserID(userA))
+	if err != nil {
+		t.Fatalf("unexpected error on empty ListActive: %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("expected a non-nil, empty slice, got %#v", empty)
+	}
+
+	// Register three devices for userA, at distinct times so ordering is
+	// unambiguous, plus one device for userB and one revoked device for
+	// userA.
+	oldest, err := p.Register(ctx, base, identity.UserID(userA), newSub("oldest"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (oldest) failed: %v", err)
+	}
+	middle, err := p.Register(ctx, base.Add(time.Minute), identity.UserID(userA), newSub("middle"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (middle) failed: %v", err)
+	}
+	newest, err := p.Register(ctx, base.Add(2*time.Minute), identity.UserID(userA), newSub("newest"), "ios-safari")
+	if err != nil {
+		t.Fatalf("fixture registration (newest) failed: %v", err)
+	}
+	revoked, err := p.Register(ctx, base.Add(3*time.Minute), identity.UserID(userA), newSub("revoked"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (revoked) failed: %v", err)
+	}
+	if err := p.Revoke(ctx, base.Add(4*time.Minute), identity.UserID(userA), revoked.ID); err != nil {
+		t.Fatalf("fixture revoke failed: %v", err)
+	}
+	otherUsersDevice, err := p.Register(ctx, base, identity.UserID(userB), newSub("other-user"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (other user) failed: %v", err)
+	}
+
+	active, err := p.ListActive(ctx, identity.UserID(userA))
+	if err != nil {
+		t.Fatalf("ListActive failed against a real database: %v", err)
+	}
+
+	// Exactly the three active userA devices, never the revoked one, never
+	// userB's.
+	if len(active) != 3 {
+		t.Fatalf("expected exactly 3 active registrations for userA, got %d: %+v", len(active), active)
+	}
+	for _, r := range active {
+		if r.UserID != identity.UserID(userA) {
+			t.Fatalf("expected every returned row to belong to userA, got one owned by %v", r.UserID)
+		}
+		if r.ID == revoked.ID {
+			t.Fatal("expected the revoked device to be excluded")
+		}
+		if r.ID == otherUsersDevice.ID {
+			t.Fatal("expected another user's device to never appear")
+		}
+		if !r.Active() {
+			t.Fatalf("expected every returned row to be active, got %+v", r)
+		}
+	}
+
+	// Deterministic newest-first ordering.
+	if active[0].ID != newest.ID || active[1].ID != middle.ID || active[2].ID != oldest.ID {
+		t.Fatalf("expected newest-first ordering [newest, middle, oldest], got ids [%v, %v, %v]",
+			active[0].ID, active[1].ID, active[2].ID)
+	}
+
+	// Fields and key material round-trip correctly for the newest row
+	// (platform hint set on registration).
+	if active[0].Platform != "ios-safari" {
+		t.Fatalf("expected the platform hint to round-trip, got %q", active[0].Platform)
+	}
+	if active[0].Subscription.Keys.P256dh != newSub("newest").Keys.P256dh || active[0].Subscription.Keys.Auth != newSub("newest").Keys.Auth {
+		t.Fatalf("expected canonical base64url keys to round-trip, got %+v", active[0].Subscription.Keys)
+	}
+
+	// userB's own ListActive sees only their own device.
+	activeB, err := p.ListActive(ctx, identity.UserID(userB))
+	if err != nil {
+		t.Fatalf("ListActive for userB failed: %v", err)
+	}
+	if len(activeB) != 1 || activeB[0].ID != otherUsersDevice.ID {
+		t.Fatalf("expected userB to see exactly their own one device, got %+v", activeB)
+	}
+
+	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+	defer c()
+	if err := tx.Rollback(cleanup); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	rolledBack = true
+}
