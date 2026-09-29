@@ -5,20 +5,23 @@
 // adapter is the separate backend/internal/notifyoutboxstore package,
 // mirroring the notifydevices/notifydevicestore, notifyconsent/
 // notifyconsentstore, and notifyprefs/notifyprefsstore pairs), no HTTP
-// handler, no route, no provider SDK, no network dependency, no worker or
-// claim/lease logic, and no eligibility-evaluation logic of any kind.
+// handler, no route, no provider SDK, no network dependency, no worker loop,
+// no provider-sending logic, and no eligibility-evaluation logic of any
+// kind.
 //
-// This package models only the outbox row's own shape and its five-state
-// machine (State, Entry). It never decides whether a device is still
-// active, whether consent is still granted, whether preferences still
-// match, whether quiet hours currently apply, or whether an account is
-// still enabled -- all of that is the future, separately authorized
-// notifypreferences (evaluation) package's job, consuming this package's
-// sibling store fresh at delivery-attempt time, never cached here. This
-// package must never import notifydevicestore, notifyconsentstore, or
-// notifyprefsstore (enforced by its own depcheck_test.go): it stores outbox
-// bookkeeping only, and must not itself gain eligibility-evaluation
-// authority by accident.
+// This package models the outbox row's own shape, its five-state machine
+// (State, Entry), and -- as of Step 8D-B Part 10 -- the fenced claim/lease
+// fields a future worker uses to safely reserve one row for one delivery
+// attempt at a time (see Entry.ClaimToken's own doc comment). It never
+// decides whether a device is still active, whether consent is still
+// granted, whether preferences still match, whether quiet hours currently
+// apply, or whether an account is still enabled -- all of that is the
+// future, separately authorized notifypreferences (evaluation) package's
+// job, consuming this package's sibling store fresh at delivery-attempt
+// time, never cached here. This package must never import
+// notifydevicestore, notifyconsentstore, or notifyprefsstore (enforced by
+// its own depcheck_test.go): it stores outbox bookkeeping only, and must
+// not itself gain eligibility-evaluation authority by accident.
 package notifyoutbox
 
 import (
@@ -100,6 +103,17 @@ type Entry struct {
 	// delivery attempt. Required while State is StatePending (migration
 	// 000010's own notification_outbox_pending_has_next_attempt CHECK);
 	// meaningless, and not guaranteed cleared, once terminal.
+	//
+	// As of migration 000011 (Step 8D-B Part 10), this field is
+	// deliberately dual-purpose, exactly mirroring
+	// radio_transmissions.transcription_next_at's own documented dual
+	// meaning: while ClaimToken is nil, it means "next retry-due time"
+	// (the original Part 6 meaning, unchanged); while ClaimToken is
+	// non-nil, the same field means "this claim's lease expiry" instead.
+	// No second timestamp field exists or is needed: "this entry is
+	// actionable right now" is always exactly
+	// State == StatePending && !NextAttemptAt.After(now), regardless of
+	// which meaning currently applies.
 	NextAttemptAt *time.Time
 	// ExpiresAt is inherited from the alert_events row this entry targets
 	// (Section 10). An entry that reaches this time without a successful
@@ -107,4 +121,18 @@ type Entry struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ClaimToken is the fencing token for the delivery-attempt claim this
+	// entry currently carries, if any (migration 000011's own
+	// claim_token column). nil means unclaimed. A non-nil value means some
+	// worker currently holds this entry reserved for one delivery attempt;
+	// see notifyoutboxstore.ClaimNextDue/ClaimSpecific/ReleaseClaim and
+	// MarkSent/RecordFailedAttempt's own doc comments for the full fencing
+	// contract this field participates in. This package itself performs no
+	// claim logic -- it only carries the value.
+	ClaimToken *string
 }
+
+// Claimed reports whether e currently carries an active delivery-attempt
+// claim (ClaimToken is non-nil). Mirrors notifydevices.Registration.Active's
+// own nil-means-unset convention.
+func (e Entry) Claimed() bool { return e.ClaimToken != nil }

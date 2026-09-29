@@ -1,18 +1,20 @@
 // Package notifyoutboxstore is the PostgreSQL persistence layer for the
 // Step 8D-B Part 6 notifyoutbox domain model (migration
 // database/migrations/000010_notification_relay_foundation.sql,
-// notification_outbox table). It is kept deliberately separate from
-// backend/internal/notifyoutbox itself: that package's own depcheck_test.go
-// forbids importing a database driver at all, so any Postgres code must live
-// here instead, mirroring the existing notifydevices/notifydevicestore,
-// notifyconsent/notifyconsentstore, and notifyprefs/notifyprefsstore
-// package-pair convention.
+// notification_outbox table, extended by migration
+// 000011_notification_outbox_claim_fencing.sql's claim_token column). It is
+// kept deliberately separate from backend/internal/notifyoutbox itself:
+// that package's own depcheck_test.go forbids importing a database driver
+// at all, so any Postgres code must live here instead, mirroring the
+// existing notifydevices/notifydevicestore, notifyconsent/
+// notifyconsentstore, and notifyprefs/notifyprefsstore package-pair
+// convention.
 //
 // This package is never registered by the live server (backend/cmd/api); a
 // caller (a test, or a future authorized integration sitting behind Step 9
 // authentication) must construct and invoke it explicitly. It has no HTTP
 // handler, no route, no provider SDK, no notification-sending code, no
-// worker/claim/lease logic, no eligibility-evaluation logic (device-active,
+// worker loop, no eligibility-evaluation logic (device-active,
 // consent-current, preferences-enabled, channel/tone/keyword match,
 // min-confidence, quiet-hours, or account-status re-checks all belong to
 // the future, separately authorized notifypreferences evaluation package --
@@ -20,16 +22,28 @@
 // notifyprefsstore, enforced by notifyoutbox's own depcheck_test.go), and
 // reads no GFR_NOTIFY_* environment variable.
 //
-// Only Enqueue, Get, MarkSent, RecordFailedAttempt, MarkExpired, and Cancel
-// are implemented (Step 8D-B Part 6). notification_deliveries is
-// deliberately deferred to a later, separately authorized substep: it is a
-// distinct table with distinct (hard immutable/append-only) semantics, not
-// something this mutable-state-machine package should also own.
+// Enqueue, Get, MarkSent, RecordFailedAttempt, MarkExpired, and Cancel are
+// implemented (Step 8D-B Part 6). ClaimNextDue, ClaimSpecific, and
+// ReleaseClaim are implemented (Step 8D-B Part 10): a fenced claim/lease
+// foundation so a future worker can safely reserve one outbox row for one
+// delivery attempt at a time, and safely detect a stale, already-superseded
+// completion attempt from a worker whose lease has already been reclaimed
+// by someone else. Claiming itself performs no side effect beyond stamping
+// claim_token/next_attempt_at: it never increments attempt_count, never
+// writes notification_deliveries, never evaluates eligibility, and never
+// sends anything -- all of that remains the future, separately authorized
+// worker/orchestration component's job. notification_deliveries itself is
+// deliberately deferred to its own, already-built, separate package
+// (notifydeliverystore): it is a distinct table with distinct (hard
+// immutable/append-only) semantics, not something this mutable-state-machine
+// package should also own.
 package notifyoutboxstore
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"net/url"
 	"regexp"
 	"time"
@@ -64,17 +78,58 @@ var (
 	// ErrNotFound marks an OutboxID this store has no row for at all.
 	ErrNotFound = errors.New("notifyoutboxstore: entry not found")
 	// ErrConflict marks an OutboxID that exists but is not eligible for the
-	// requested transition: already terminal (every transition method only
-	// ever operates FROM state = 'pending'; a terminal entry never
-	// transitions again), or -- for MarkExpired specifically -- still
-	// pending but not yet past its own expires_at. This is deliberately one
-	// sentinel covering both cases: from a caller's perspective, "this
-	// entry's current state does not permit this transition right now" is
-	// exactly one condition, whichever underlying reason produced it.
+	// requested transition. This one sentinel deliberately covers every
+	// such case, since from a caller's perspective "this entry's current
+	// state does not permit this transition right now" is exactly one
+	// condition, whichever underlying reason produced it:
+	//   - already terminal (every transition method only ever operates
+	//     FROM state = 'pending'; a terminal entry never transitions
+	//     again);
+	//   - for MarkExpired specifically, still pending but not yet past its
+	//     own expires_at;
+	//   - for MarkSent/RecordFailedAttempt/ReleaseClaim (Step 8D-B Part
+	//     10), the claim_token supplied no longer matches the entry's
+	//     current claim_token -- either because a different worker has
+	//     already reclaimed this entry after the caller's own lease
+	//     expired (see ClaimNextDue's own doc comment), or because the
+	//     entry was never claimed with that token at all; this is the
+	//     fencing mechanism that rejects a stale worker's completion
+	//     attempt outright, with zero mutation;
+	//   - for Cancel/MarkExpired (Part 10), the entry is currently claimed
+	//     at all (claim_token IS NOT NULL) -- an active claim is never
+	//     silently overridden or cleared by an unrelated terminal
+	//     transition; the claim owner's own eventual completion or the
+	//     lease's own expiry is the only way such an entry becomes
+	//     cancelable/expirable again.
 	ErrConflict = errors.New("notifyoutboxstore: entry is not eligible for this transition")
 	// ErrUnavailable marks a database failure. Callers must fail closed.
 	ErrUnavailable = errors.New("notifyoutboxstore: database unavailable")
 )
+
+// newClaimToken generates a fresh, cryptographically random claim-fencing
+// token: 16 random bytes, hex-encoded in the standard, hyphenated UUID
+// textual representation (8-4-4-4-12 hex digits). This deliberately
+// duplicates internal/transcription.NewClaim's own exact random-generation
+// approach locally (stdlib crypto/rand only, no external UUID library)
+// rather than importing the transcription domain merely to generate
+// tokens -- transcription is an unrelated domain, and this package must
+// not depend on it just to reuse a few lines of token-generation logic.
+//
+// The hyphenated format is deliberate, not cosmetic: PostgreSQL's `uuid`
+// type always normalizes to this exact canonical textual form on output,
+// regardless of whether the hyphens were present in whatever text was
+// originally cast to `uuid` on input (Postgres accepts both). Since every
+// claim token a caller ever sees again after the initial claim comes back
+// through a RETURNING clause (i.e. always canonicalized, always
+// hyphenated), generating it in that same canonical shape from the start
+// means exactly one token format exists anywhere in this package, with
+// nothing to reconcile between "freshly generated" and "read back from the
+// database."
+func newClaimToken() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // eventIDPattern duplicates alert_events.event_id's own migration-level
 // CHECK shape (database/migrations/000007_alert_persistence.sql) locally,
@@ -84,6 +139,16 @@ var (
 // (enforced by notifyoutbox's own depcheck_test.go), and must still
 // validate before ever reaching SQL.
 var eventIDPattern = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+
+// claimTokenPattern matches the standard hyphenated UUID textual
+// representation (8-4-4-4-12 lowercase hex digits) -- both newClaimToken's
+// own output shape, and the canonical shape PostgreSQL always returns a
+// `uuid` column's value as, regardless of the format originally used to
+// write it. A caller-supplied claimToken is validated against this shape
+// before it ever reaches SQL, rather than relying on a raw ::uuid cast
+// failure (Postgres error 22P02, invalid_text_representation, which
+// safeDB does not classify as ErrInput) to reject a malformed value.
+var claimTokenPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Querier is the minimal pgx surface every method here needs: each is a
 // single atomic statement (one INSERT ... RETURNING, one plain SELECT, or
@@ -165,7 +230,7 @@ func safeDB(err error) error {
 // scanEntry reads exactly the column list every method here produces,
 // whether via RETURNING or a plain SELECT: id, event_id, device_id,
 // user_id, state, attempt_count, max_attempts, next_attempt_at, expires_at,
-// created_at, updated_at.
+// created_at, updated_at, claim_token.
 func scanEntry(row pgx.Row) (notifyoutbox.Entry, error) {
 	var (
 		id, deviceID, userID            int64
@@ -173,9 +238,10 @@ func scanEntry(row pgx.Row) (notifyoutbox.Entry, error) {
 		attemptCount, maxAttempts       int
 		nextAttemptAt                   *time.Time
 		expiresAt, createdAt, updatedAt time.Time
+		claimToken                      *string
 	)
 	if err := row.Scan(&id, &eventID, &deviceID, &userID, &state, &attemptCount, &maxAttempts,
-		&nextAttemptAt, &expiresAt, &createdAt, &updatedAt); err != nil {
+		&nextAttemptAt, &expiresAt, &createdAt, &updatedAt, &claimToken); err != nil {
 		return notifyoutbox.Entry{}, err
 	}
 	return notifyoutbox.Entry{
@@ -190,10 +256,11 @@ func scanEntry(row pgx.Row) (notifyoutbox.Entry, error) {
 		ExpiresAt:     expiresAt,
 		CreatedAt:     createdAt,
 		UpdatedAt:     updatedAt,
+		ClaimToken:    claimToken,
 	}, nil
 }
 
-const selectColumns = `id, event_id, device_id, user_id, state, attempt_count, max_attempts, next_attempt_at, expires_at, created_at, updated_at`
+const selectColumns = `id, event_id, device_id, user_id, state, attempt_count, max_attempts, next_attempt_at, expires_at, created_at, updated_at, claim_token`
 
 // classifyMissingOrConflict runs after any transition method's UPDATE ...
 // RETURNING returns zero rows, to decide which of the two possible reasons
@@ -333,17 +400,32 @@ func (p *Postgres) Get(ctx context.Context, id notifyoutbox.OutboxID) (notifyout
 // fails closed with ErrNotFound, and an existing but already-terminal id
 // fails closed with ErrConflict (see ErrConflict's own doc comment) --
 // never silently re-succeeding and never overwriting a terminal outcome.
-func (p *Postgres) MarkSent(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
+//
+// As of Step 8D-B Part 10, this transition is fenced: claimToken must
+// equal the entry's own current claim_token, checked in the same WHERE
+// clause as id/state (id, state, and claim-token equality together are the
+// complete and sufficient fencing condition -- no additional lease-expiry
+// re-validation is performed at completion time, exactly mirroring the
+// existing radio_transmissions/transcription_claim precedent's own
+// finish_transcription logic). If a different worker has since reclaimed
+// this entry (its claim_token no longer equals the caller's own, stale
+// token), this call matches zero rows and fails closed with ErrConflict,
+// mutating nothing -- the reclaiming worker's own attempt is completely
+// unaffected. On success, claim_token is cleared to NULL: a sent entry is
+// terminal and carries no claim at all (migration 000011's own
+// notification_outbox_claim_implies_pending CHECK would reject a terminal
+// row with a non-NULL claim_token in any case).
+func (p *Postgres) MarkSent(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error) {
 	if p == nil || p.DB == nil {
 		return notifyoutbox.Entry{}, ErrUnavailable
 	}
-	if now.IsZero() || id <= 0 {
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) {
 		return notifyoutbox.Entry{}, ErrInput
 	}
 
-	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'sent', next_attempt_at = NULL
-        WHERE id = $1 AND state = 'pending'
-        RETURNING `+selectColumns, int64(id))
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'sent', next_attempt_at = NULL, claim_token = NULL
+        WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid
+        RETURNING `+selectColumns, int64(id), claimToken)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -392,11 +474,26 @@ func (p *Postgres) MarkSent(ctx context.Context, now time.Time, id notifyoutbox.
 // As with every other transition method, this only ever operates from
 // state = 'pending'; an unknown id fails closed with ErrNotFound, and an
 // already-terminal id fails closed with ErrConflict.
-func (p *Postgres) RecordFailedAttempt(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, nextAttemptAt time.Time) (notifyoutbox.Entry, error) {
+//
+// As of Step 8D-B Part 10, this transition is fenced identically to
+// MarkSent: claimToken must equal the entry's own current claim_token, in
+// the same WHERE clause as id/state, with no additional lease-expiry
+// re-validation. This applies uniformly to all three of the CASE
+// expression's own branches above -- the fencing check happens at row
+// selection, before any of those branches are ever evaluated, so a stale
+// worker's claim can never increment attempt_count, transition the entry
+// to dead_letter/expired, or overwrite a newer claim's own next_attempt_at,
+// regardless of which outcome its own (unfenced) view of the row would
+// have produced. claim_token is cleared to NULL on every one of the three
+// branches: a fresh claim is always required for whatever attempt comes
+// next (Part 10's own "retries create a new claim token each time" design),
+// and a terminal branch (expired/dead_letter) must carry no claim at all,
+// exactly like MarkSent.
+func (p *Postgres) RecordFailedAttempt(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, nextAttemptAt time.Time, claimToken string) (notifyoutbox.Entry, error) {
 	if p == nil || p.DB == nil {
 		return notifyoutbox.Entry{}, ErrUnavailable
 	}
-	if now.IsZero() || id <= 0 || nextAttemptAt.IsZero() {
+	if now.IsZero() || id <= 0 || nextAttemptAt.IsZero() || !claimTokenPattern.MatchString(claimToken) {
 		return notifyoutbox.Entry{}, ErrInput
 	}
 
@@ -412,9 +509,10 @@ func (p *Postgres) RecordFailedAttempt(ctx context.Context, now time.Time, id no
                 WHEN $2::timestamptz >= expires_at THEN NULL
                 WHEN attempt_count + 1 >= max_attempts THEN NULL
                 ELSE $3::timestamptz
-            END
-        WHERE id = $1 AND state = 'pending'
-        RETURNING `+selectColumns, int64(id), now, nextAttemptAt)
+            END,
+            claim_token = NULL
+        WHERE id = $1 AND state = 'pending' AND claim_token = $4::uuid
+        RETURNING `+selectColumns, int64(id), now, nextAttemptAt, claimToken)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -430,11 +528,13 @@ func (p *Postgres) RecordFailedAttempt(ctx context.Context, now time.Time, id no
 // attempt ever having been made at all (a future reaper-style sweep's
 // primitive -- the sweep loop itself is out of scope here, only this
 // single-row conditional transition is). It only ever succeeds for an
-// entry that is both currently pending AND already at or past its own
-// expires_at; an unknown id fails closed with ErrNotFound, and an id that
-// exists but is either already terminal, or still pending but not yet
-// actually due to expire, both fail closed with the same ErrConflict (see
-// ErrConflict's own doc comment for why one sentinel covers both cases).
+// entry that is currently pending, already at or past its own expires_at,
+// AND currently unclaimed; an unknown id fails closed with ErrNotFound, and
+// an id that exists but is either already terminal, still pending but not
+// yet actually due to expire, or currently claimed (Step 8D-B Part 10: an
+// active claim is never silently overridden or cleared by this
+// transition), all fail closed with the same ErrConflict (see ErrConflict's
+// own doc comment for why one sentinel covers every such case).
 func (p *Postgres) MarkExpired(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
 	if p == nil || p.DB == nil {
 		return notifyoutbox.Entry{}, ErrUnavailable
@@ -444,7 +544,7 @@ func (p *Postgres) MarkExpired(ctx context.Context, now time.Time, id notifyoutb
 	}
 
 	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'expired', next_attempt_at = NULL
-        WHERE id = $1 AND state = 'pending' AND expires_at <= $2
+        WHERE id = $1 AND state = 'pending' AND claim_token IS NULL AND expires_at <= $2
         RETURNING `+selectColumns, int64(id), now)
 	entry, err := scanEntry(row)
 	if err != nil {
@@ -463,9 +563,19 @@ func (p *Postgres) MarkExpired(ctx context.Context, now time.Time, id notifyoutb
 // separately authorized quiet-hours-suppression evaluator would call, per
 // migration 000010's own Decision 4). This package makes no decision about
 // *when* Cancel should be called for any of those reasons -- it only
-// provides the transition itself. As with every other transition method,
-// an unknown id fails closed with ErrNotFound, and an already-terminal id
-// fails closed with ErrConflict.
+// provides the transition itself.
+//
+// As of Step 8D-B Part 10, Cancel only ever operates on a currently
+// unclaimed entry (claim_token IS NULL): a cancellation must never
+// terminate a row out from under an active claim, silently clearing or
+// overriding whatever a claim owner is currently doing with it. If Cancel
+// is attempted against a claimed, still-pending entry, this fails closed
+// with ErrConflict, exactly like every other not-currently-eligible case --
+// the claim owner's own eventual completion (MarkSent/RecordFailedAttempt)
+// or the lease's own expiry is the only way such an entry becomes
+// cancelable again. As with every other transition method, an unknown id
+// fails closed with ErrNotFound, and an already-terminal id fails closed
+// with ErrConflict too.
 func (p *Postgres) Cancel(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
 	if p == nil || p.DB == nil {
 		return notifyoutbox.Entry{}, ErrUnavailable
@@ -475,8 +585,137 @@ func (p *Postgres) Cancel(ctx context.Context, now time.Time, id notifyoutbox.Ou
 	}
 
 	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'canceled', next_attempt_at = NULL
-        WHERE id = $1 AND state = 'pending'
+        WHERE id = $1 AND state = 'pending' AND claim_token IS NULL
         RETURNING `+selectColumns, int64(id))
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// ClaimNextDue atomically finds one currently-actionable pending entry --
+// state = 'pending' AND next_attempt_at <= now, exactly the same condition
+// that has always meant "due for a fresh retry," now additionally
+// satisfied by any entry whose previous claim's lease has already lapsed
+// (Step 8D-B Part 10: abandoned-claim recovery is free, automatic, and
+// requires no special-case code beyond this one shared condition) -- and
+// reserves it for exactly one delivery attempt: a fresh claim_token is
+// generated (never reused across attempts) and next_attempt_at is bumped
+// forward to now + leaseDuration, now serving as this claim's own lease
+// expiry rather than a retry-due time (see notifyoutbox.Entry.NextAttemptAt's
+// own doc comment for this dual meaning).
+//
+// This is a single atomic statement: an outer UPDATE targets the id chosen
+// by an inner SELECT ... FOR UPDATE SKIP LOCKED, so two concurrent callers
+// can never claim the same row, and a caller racing against a row another
+// transaction already has locked simply skips it and considers the next
+// candidate, rather than blocking. No explicit transaction is used here,
+// exactly like every other method in this package: the single statement's
+// own atomicity is sufficient.
+//
+// Claiming itself performs no side effect beyond stamping claim_token/
+// next_attempt_at: it never increments attempt_count, never writes
+// notification_deliveries, never evaluates eligibility, and never sends
+// anything.
+//
+// ok is false with a nil error exactly when no entry is currently due --
+// an empty queue is a normal, expected outcome, never an error.
+func (p *Postgres) ClaimNextDue(ctx context.Context, now time.Time, leaseDuration time.Duration) (notifyoutbox.Entry, bool, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, false, ErrUnavailable
+	}
+	if now.IsZero() || leaseDuration <= 0 {
+		return notifyoutbox.Entry{}, false, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox
+        SET claim_token = $2::uuid, next_attempt_at = $3
+        WHERE id = (
+            SELECT id FROM notification_outbox
+            WHERE state = 'pending' AND next_attempt_at <= $1
+            ORDER BY next_attempt_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        RETURNING `+selectColumns, now, newClaimToken(), now.Add(leaseDuration))
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, false, nil
+		}
+		return notifyoutbox.Entry{}, false, safeDB(err)
+	}
+	return entry, true, nil
+}
+
+// ClaimSpecific claims id specifically, rather than whichever entry happens
+// to be next due -- otherwise identical to ClaimNextDue: the same
+// fresh-token, same lease-duration-from-now semantics, the same "no side
+// effect beyond claim_token/next_attempt_at" guarantee. It only succeeds
+// for an entry that is both currently pending and already due (the
+// existing "not yet due" condition and the new "already claimed by a
+// still-valid lease" condition are indistinguishable at this single
+// next_attempt_at <= now check, exactly as intended: both mean "not
+// currently claimable"); an unknown id fails closed with ErrNotFound, and
+// an id that exists but is not currently claimable fails closed with
+// ErrConflict.
+//
+// A plain UPDATE ... WHERE id = $1 is sufficient here, with no FOR UPDATE
+// SKIP LOCKED: targeting one already-known id has no "which of several
+// candidates" ambiguity for SKIP LOCKED to resolve -- the UPDATE's own
+// ordinary row-level lock already fully serializes two concurrent callers
+// targeting the same id.
+func (p *Postgres) ClaimSpecific(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, leaseDuration time.Duration) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || leaseDuration <= 0 {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox
+        SET claim_token = $3::uuid, next_attempt_at = $4
+        WHERE id = $1 AND state = 'pending' AND next_attempt_at <= $2
+        RETURNING `+selectColumns, int64(id), now, newClaimToken(), now.Add(leaseDuration))
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// ReleaseClaim voluntarily releases id's current claim before its lease
+// would otherwise expire (for example, a worker shutting down cleanly
+// rather than making some other worker wait out the full lease
+// unnecessarily): claim_token is cleared to NULL and next_attempt_at is set
+// to now, making the entry immediately reclaimable by a future
+// ClaimNextDue/ClaimSpecific call. This never touches attempt_count: a
+// released, never-attempted claim costs nothing, exactly like an
+// abandoned claim recovered automatically via lease expiry.
+//
+// Fenced identically to MarkSent/RecordFailedAttempt: claimToken must
+// equal id's own current claim_token, checked in the same WHERE clause as
+// id/state. A stale or already-superseded token fails closed with
+// ErrConflict, mutating nothing -- releasing with the wrong token can
+// never clear a different (newer) claim out from under its own owner.
+func (p *Postgres) ReleaseClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET claim_token = NULL, next_attempt_at = $2
+        WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid
+        RETURNING `+selectColumns, int64(id), now, claimToken)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
