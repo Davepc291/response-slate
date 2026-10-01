@@ -27,6 +27,13 @@
 // Options.Env and Request.TestMode (Part 12B's own additive contract
 // amendment) are plain, opaque values this package compares directly,
 // never resolved by importing notifydevices or any database.
+//
+// Step 8D-B Part 13 corrected this package's own JSON wire encoding (see
+// buildPushPayload's own doc comment): the plaintext payload sent is now
+// shaped exactly as Angular's generated service worker requires in order to
+// actually display a notification, instead of the flat shape Part 12
+// shipped. notifyrelay.Payload itself is unchanged -- this is a wire-format
+// concern local to this one concrete Sender.
 package notifywebpush
 
 import (
@@ -351,10 +358,68 @@ func New(o Options, transport http.RoundTripper) (*Sender, error) {
 	return &Sender{options: o, client: client}, nil
 }
 
-type payloadJSON struct {
-	Title string `json:"title"`
-	Body  string `json:"body,omitempty"`
-	URL   string `json:"url,omitempty"`
+// pushPayload, notificationOptions, notificationData, onActionClickMap, and
+// onActionClickAction together produce the exact wire shape Angular's own
+// generated service worker (ngsw-worker.js) requires in order to display a
+// push notification and, on click, open a URL (Step 8D-B Part 13
+// discovery/design-lock, verified directly against the shipped
+// @angular/service-worker runtime source, not assumed): a top-level
+// "notification" object (anything else -- including the flat
+// {"title","body","url"} shape this package produced before Part 13 --
+// causes ngsw-worker.js's own handlePush to silently return without ever
+// calling showNotification, since it specifically checks
+// `!data.notification || !data.notification.title`), with a click-time URL
+// expressed only via notification.data.onActionClick.default.url (a bare
+// top-level "url" field, inside or outside "notification", is never read by
+// ngsw-worker.js's click handler and would just be silently dropped).
+//
+// This wire shape is deliberately owned by this package alone, not by
+// notifyrelay.Payload: notifyrelay stays a generic, provider-neutral
+// title/body/url carrier, and this concrete Web Push Sender is responsible
+// for encoding that into whatever its one supported client (Angular's
+// service worker) actually needs. It must never add a user id, event id,
+// transcript, radio text, or any other alert metadata beyond the three
+// fields notifyrelay.Payload already carries.
+type pushPayload struct {
+	Notification notificationOptions `json:"notification"`
+}
+
+type notificationOptions struct {
+	Title string            `json:"title"`
+	Body  string            `json:"body,omitempty"`
+	Data  *notificationData `json:"data,omitempty"`
+}
+
+type notificationData struct {
+	OnActionClick onActionClickMap `json:"onActionClick"`
+}
+
+type onActionClickMap struct {
+	Default onActionClickAction `json:"default"`
+}
+
+type onActionClickAction struct {
+	Operation string `json:"operation"`
+	URL       string `json:"url"`
+}
+
+// buildPushPayload converts a provider-neutral notifyrelay.Payload into the
+// Angular-service-worker-shaped plaintext this package encrypts and sends.
+// Title is always present (notifyrelay.Request.Validate already requires a
+// non-empty title before Send ever reaches this call). Body is omitted
+// entirely when empty (via its own omitempty), and the whole
+// data/onActionClick structure is omitted entirely when URL is empty --
+// never emitted as an empty/null placeholder either way.
+func buildPushPayload(p notifyrelay.Payload) pushPayload {
+	notification := notificationOptions{Title: p.Title, Body: p.Body}
+	if p.URL != "" {
+		notification.Data = &notificationData{
+			OnActionClick: onActionClickMap{
+				Default: onActionClickAction{Operation: "openWindow", URL: p.URL},
+			},
+		}
+	}
+	return pushPayload{Notification: notification}
 }
 
 // Send implements notifyrelay.Sender. It refuses (fail closed) before any
@@ -384,7 +449,7 @@ func (s *Sender) Send(ctx context.Context, req notifyrelay.Request) (notifyrelay
 	sendCtx, cancel := context.WithTimeout(ctx, s.options.SendTimeout)
 	defer cancel()
 
-	body, err := json.Marshal(payloadJSON{Title: req.Payload.Title, Body: req.Payload.Body, URL: req.Payload.URL})
+	body, err := json.Marshal(buildPushPayload(req.Payload))
 	if err != nil {
 		return notifyrelay.Result{}, ErrPayloadEncoding
 	}

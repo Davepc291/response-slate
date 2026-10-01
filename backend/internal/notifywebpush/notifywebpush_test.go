@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -479,6 +480,84 @@ func TestDrainAndCloseAlwaysClosesTheBody(t *testing.T) {
 	drainAndClose(body)
 	if !body.closed {
 		t.Fatal("expected drainAndClose to close the body")
+	}
+}
+
+// --- buildPushPayload: the exact Angular-service-worker-shaped plaintext,
+// verified prior to encryption (Step 8D-B Part 13's own payload-shape
+// correction) ---
+
+func marshalPayload(t *testing.T, p pushPayload) string {
+	t.Helper()
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+	return string(b)
+}
+
+func TestBuildPushPayloadTitleOnly(t *testing.T) {
+	got := marshalPayload(t, buildPushPayload(notifyrelay.Payload{Title: "Dispatch alert"}))
+	want := `{"notification":{"title":"Dispatch alert"}}`
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestBuildPushPayloadWithBodyNoURL(t *testing.T) {
+	got := marshalPayload(t, buildPushPayload(notifyrelay.Payload{Title: "Dispatch alert", Body: "Engine 3 dispatched"}))
+	want := `{"notification":{"title":"Dispatch alert","body":"Engine 3 dispatched"}}`
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestBuildPushPayloadWithURLNoBody(t *testing.T) {
+	got := marshalPayload(t, buildPushPayload(notifyrelay.Payload{Title: "Dispatch alert", URL: "https://app.example.com/incidents/42"}))
+	want := `{"notification":{"title":"Dispatch alert","data":{"onActionClick":{"default":{"operation":"openWindow","url":"https://app.example.com/incidents/42"}}}}}`
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestBuildPushPayloadWithBodyAndURL(t *testing.T) {
+	got := marshalPayload(t, buildPushPayload(notifyrelay.Payload{
+		Title: "Dispatch alert",
+		Body:  "Engine 3 dispatched",
+		URL:   "https://app.example.com/incidents/42",
+	}))
+	want := `{"notification":{"title":"Dispatch alert","body":"Engine 3 dispatched","data":{"onActionClick":{"default":{"operation":"openWindow","url":"https://app.example.com/incidents/42"}}}}}`
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+// TestBuildPushPayloadNeverIncludesAlertMetadata proves, by exact round-trip
+// field inspection, that nothing beyond title/body/data.onActionClick ever
+// appears: no user id, event id, transcript, radio text, or other alert
+// metadata field exists on pushPayload/notificationOptions at all, so this
+// is a structural guarantee, not just a per-case assertion.
+func TestBuildPushPayloadNeverIncludesAlertMetadata(t *testing.T) {
+	raw := marshalPayload(t, buildPushPayload(notifyrelay.Payload{
+		Title: "Dispatch alert", Body: "Engine 3 dispatched", URL: "https://app.example.com/incidents/42",
+	}))
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("expected exactly one top-level key (notification), got %v", decoded)
+	}
+	notification, ok := decoded["notification"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a notification object, got %v", decoded["notification"])
+	}
+	for key := range notification {
+		switch key {
+		case "title", "body", "data":
+		default:
+			t.Fatalf("unexpected field %q in notification payload", key)
+		}
 	}
 }
 
