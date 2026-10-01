@@ -36,6 +36,17 @@
 // OutboxID is therefore a plain local identity carrier, not
 // notifyoutbox.OutboxID: a caller converts explicitly (see OutboxID's own
 // doc comment).
+//
+// Step 8D-B Part 12B's design lock added two small, additive fields ahead
+// of Part 12's concrete backend/internal/notifywebpush sender:
+// Request.TestMode (a plain, opaque bool a concrete Sender needs to
+// enforce its own environment/test-mode isolation policy without
+// importing notifydevices or any store) and Result.RetryAfter (an
+// optional, parsed backoff hint so that information is not silently
+// discarded before a future orchestration caller exists to use it).
+// Neither changes this package's own scope or authority: it still
+// performs no HTTP/network I/O, no VAPID signing, no encryption, and no
+// outbox/delivery-audit mutation of any kind.
 package notifyrelay
 
 import (
@@ -45,6 +56,7 @@ import (
 	"net/url"
 	"regexp"
 	"sync"
+	"time"
 )
 
 // Web Push subscription key sizes, fixed by RFC 8291 (Message Encryption
@@ -188,6 +200,18 @@ type Request struct {
 	P256dh   string
 	Auth     string
 	Payload  Payload
+	// TestMode is a plain, caller-supplied copy of the target device
+	// registration's own notifydevices.Registration.TestMode value (Step
+	// 8D-B Part 12B's design lock). It is an opaque bool this package
+	// neither interprets nor validates against anything -- it exists so a
+	// concrete Sender (which must never import notifydevices or any store,
+	// per this package's own doc comment) can still enforce its own
+	// environment/test-mode isolation policy using only information already
+	// present on the Request, without gaining a dependency on the device
+	// registration this value was copied from. A future caller converts it
+	// explicitly (Request{TestMode: registration.TestMode, ...}), exactly
+	// like OutboxID's own conversion convention.
+	TestMode bool
 }
 
 // Validate checks every field of r independently. It never trusts a
@@ -268,18 +292,34 @@ type Result struct {
 	// code values: a concrete Sender implementation is the producer, this
 	// field only their generic, format-validating carrier.
 	Code *string
+	// RetryAfter is an optional, parsed backoff hint (RFC 9110 Section
+	// 10.2.3's Retry-After header, in either its delta-seconds or
+	// HTTP-date form), populated only when a concrete Sender's underlying
+	// transport received one alongside a retryable response (for example
+	// HTTP 429 or 5xx). nil means no such hint was available -- never a
+	// claim that immediate retry is safe. This package performs no
+	// parsing itself and imposes no bound on the value beyond it being
+	// non-negative (see Validate); a concrete Sender is the only producer.
+	// A future caller (orchestration) is never required to honor it, but
+	// this field exists so the information is not silently discarded
+	// before that caller exists.
+	RetryAfter *time.Duration
 }
 
-// Validate checks that r carries a Valid Outcome and, if present, a
-// well-formed Code. A Sender implementation is expected to only ever
-// return an already-valid Result; this exists so a caller (or a test) can
-// verify that structurally rather than by trusting the implementation.
+// Validate checks that r carries a Valid Outcome, a non-negative
+// RetryAfter if present, and, if present, a well-formed Code. A Sender
+// implementation is expected to only ever return an already-valid Result;
+// this exists so a caller (or a test) can verify that structurally rather
+// than by trusting the implementation.
 func (r Result) Validate() error {
 	if !r.Outcome.Valid() {
 		return errors.New("notifyrelay: result outcome is not one of the four approved values")
 	}
 	if r.Code != nil && !codePattern.MatchString(*r.Code) {
 		return ErrInvalidCode
+	}
+	if r.RetryAfter != nil && *r.RetryAfter < 0 {
+		return errors.New("notifyrelay: result retry-after must not be negative")
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // validP256dh returns a well-formed, base64url-encoded 65-byte value: the
@@ -280,6 +281,44 @@ func TestResultValidate(t *testing.T) {
 	badCode := "Not Valid! 123"
 	if err := (Result{Outcome: OutcomeAccepted, Code: &badCode}).Validate(); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected %v, got %v", ErrInvalidCode, err)
+	}
+}
+
+// TestRequestTestModeIsPlainOpaqueField proves TestMode round-trips as a
+// plain bool with no validation of its own (both values are always legal
+// shapes for Validate) -- this package never interprets it, it only
+// carries it (Step 8D-B Part 12B).
+func TestRequestTestModeIsPlainOpaqueField(t *testing.T) {
+	for _, tm := range []bool{true, false} {
+		req := validRequest()
+		req.TestMode = tm
+		if err := req.Validate(); err != nil {
+			t.Fatalf("TestMode=%v: expected an otherwise well-formed request to validate, got %v", tm, err)
+		}
+	}
+}
+
+// TestResultValidateRetryAfter proves RetryAfter is optional (nil is
+// always valid), accepts a non-negative duration, and rejects a negative
+// one (Step 8D-B Part 12B).
+func TestResultValidateRetryAfter(t *testing.T) {
+	if err := (Result{Outcome: OutcomeTemporaryFailure}).Validate(); err != nil {
+		t.Fatalf("expected a nil RetryAfter to validate, got %v", err)
+	}
+
+	zero := time.Duration(0)
+	if err := (Result{Outcome: OutcomeTemporaryFailure, RetryAfter: &zero}).Validate(); err != nil {
+		t.Fatalf("expected a zero RetryAfter to validate, got %v", err)
+	}
+
+	positive := 30 * time.Second
+	if err := (Result{Outcome: OutcomeTemporaryFailure, RetryAfter: &positive}).Validate(); err != nil {
+		t.Fatalf("expected a positive RetryAfter to validate, got %v", err)
+	}
+
+	negative := -time.Second
+	if err := (Result{Outcome: OutcomeTemporaryFailure, RetryAfter: &negative}).Validate(); err == nil {
+		t.Fatal("expected a negative RetryAfter to fail validation")
 	}
 }
 
