@@ -14,7 +14,14 @@
 // reads no GFR_NOTIFY_* environment variable.
 //
 // Register, Get, Replace, Revoke, and ListActive are all implemented (Step
-// 8D-B Part 3, slices 1, 2A, 2B, 2C, and 2D).
+// 8D-B Part 3, slices 1, 2A, 2B, 2C, and 2D). As of Step 8D-B Part 14A, every
+// one of them also reads back notification_devices.test_mode (reserved since
+// migration 000010, read by no code before now) into
+// notifydevices.Registration.TestMode; none of them writes it -- Register's
+// INSERT never supplies it (the column's own DEFAULT false applies to a
+// fresh row) and its ON CONFLICT DO UPDATE SET clause never touches it
+// either, so re-registering an existing endpoint can never reset or flip a
+// device's test_mode value as a side effect.
 package notifydevicestore
 
 import (
@@ -261,7 +268,7 @@ func (p *Postgres) Register(ctx context.Context, now time.Time, userID identity.
             platform = EXCLUDED.platform,
             updated_at = EXCLUDED.updated_at
         WHERE notification_devices.user_id = EXCLUDED.user_id
-        RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by`,
+        RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode`,
 		int64(userID), sub.Endpoint, p256dh, auth, platformArg, now)
 
 	reg, err := scanRegistration(row)
@@ -350,7 +357,7 @@ func (p *Postgres) Replace(ctx context.Context, now time.Time, userID identity.U
 	}
 	defer rollback(tx)
 
-	oldRow := tx.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+	oldRow := tx.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode
         FROM notification_devices WHERE id = $1 AND revoked_at IS NULL FOR UPDATE`, int64(oldID))
 	old, err := scanRegistration(oldRow)
 	if err != nil {
@@ -374,7 +381,7 @@ func (p *Postgres) Replace(ctx context.Context, now time.Time, userID identity.U
 	if sub.Endpoint == old.Subscription.Endpoint {
 		row := tx.QueryRow(ctx, `UPDATE notification_devices SET p256dh = $1, auth = $2, platform = $3, updated_at = $4
             WHERE id = $5
-            RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by`,
+            RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode`,
 			p256dh, auth, platformArg, now, int64(oldID))
 		updated, err := scanRegistration(row)
 		if err != nil {
@@ -401,7 +408,7 @@ func (p *Postgres) Replace(ctx context.Context, now time.Time, userID identity.U
 
 	freshRow := tx.QueryRow(ctx, `INSERT INTO notification_devices (user_id, endpoint, p256dh, auth, platform, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6, $6)
-        RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by`,
+        RETURNING id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode`,
 		int64(userID), sub.Endpoint, p256dh, auth, platformArg, now)
 	fresh, err := scanRegistration(freshRow)
 	if err != nil {
@@ -504,7 +511,7 @@ func (p *Postgres) Get(ctx context.Context, id notifydevices.DeviceID) (notifyde
 		return notifydevices.Registration{}, false, ErrInput
 	}
 
-	row := p.DB.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+	row := p.DB.QueryRow(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode
         FROM notification_devices WHERE id = $1`, int64(id))
 
 	reg, err := scanRegistration(row)
@@ -552,7 +559,7 @@ func (p *Postgres) ListActive(ctx context.Context, userID identity.UserID) ([]no
 		return nil, ErrInput
 	}
 
-	rows, err := p.DB.Query(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by
+	rows, err := p.DB.Query(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode
         FROM notification_devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC, id DESC`, int64(userID))
 	if err != nil {
 		return nil, safeDB(err)
@@ -597,8 +604,9 @@ func scanRegistration(row pgx.Row) (notifydevices.Registration, error) {
 		createdAt, updatedAt time.Time
 		revokedAt            *time.Time
 		supersededBy         *int64
+		testMode             bool
 	)
-	if err := row.Scan(&id, &userID, &endpoint, &p256dh, &auth, &platform, &createdAt, &updatedAt, &revokedAt, &supersededBy); err != nil {
+	if err := row.Scan(&id, &userID, &endpoint, &p256dh, &auth, &platform, &createdAt, &updatedAt, &revokedAt, &supersededBy, &testMode); err != nil {
 		return notifydevices.Registration{}, err
 	}
 	reg := notifydevices.Registration{
@@ -614,6 +622,7 @@ func scanRegistration(row pgx.Row) (notifydevices.Registration, error) {
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 		RevokedAt: revokedAt,
+		TestMode:  testMode,
 	}
 	if platform != nil {
 		reg.Platform = *platform

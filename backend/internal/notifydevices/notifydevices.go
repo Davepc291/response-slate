@@ -185,6 +185,17 @@ type Registration struct {
 	// Store.Replace (Section 6's "device replacement" case). Zero means this
 	// row was never superseded; it may still be independently revoked.
 	SupersededBy DeviceID
+	// TestMode mirrors notification_devices.test_mode (migration 000010,
+	// reserved since Step 8D-B Part 2; read by no code before Step 8D-B Part
+	// 14A). false is the default for every registration this in-memory Store
+	// constructs: Register/Replace accept no test-mode parameter and never
+	// set this true themselves, exactly mirroring the database column's own
+	// DEFAULT false -- toggling it remains outside this package's scope,
+	// unchanged by this field's addition. A caller (notifydevicestore, or a
+	// future authorized orchestration component) that needs to know whether
+	// a specific stored device is a sandbox/dev target reads this field
+	// rather than hardcoding an assumption.
+	TestMode bool
 }
 
 // Active reports whether r currently represents a live, deliverable

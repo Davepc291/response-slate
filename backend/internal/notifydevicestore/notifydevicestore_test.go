@@ -42,6 +42,7 @@ type fakeRow struct {
 	createdAt, updatedAt time.Time
 	revokedAt            *time.Time
 	supersededBy         *int64
+	testMode             bool
 	err                  error
 }
 
@@ -59,6 +60,7 @@ func (r fakeRow) Scan(dest ...any) error {
 	*dest[7].(*time.Time) = r.updatedAt
 	*dest[8].(**time.Time) = r.revokedAt
 	*dest[9].(**int64) = r.supersededBy
+	*dest[10].(*bool) = r.testMode
 	return nil
 }
 
@@ -467,6 +469,64 @@ func TestGetActiveRegistrationRoundTrips(t *testing.T) {
 	}
 	if reg.SupersededBy != 0 {
 		t.Fatalf("expected no supersession, got %v", reg.SupersededBy)
+	}
+	if reg.TestMode {
+		t.Fatalf("expected TestMode=false when the stored column is false, got %+v", reg)
+	}
+}
+
+// TestGetReadsTestModeTrue proves Get reads back a true test_mode column
+// value (Step 8D-B Part 14A): the fakeQuerier's underlying SQL text is
+// asserted to include the column in TestGetTestModeColumnIncludedInSelect
+// below; this test proves the Go-side scan/field population specifically.
+func TestGetReadsTestModeTrue(t *testing.T) {
+	q := &fakeQuerier{row: fakeRow{
+		id: 7, userID: 3, endpoint: "https://push.example.com/send/abc123",
+		p256dh: rawP256dh(), auth: rawAuth(), testMode: true,
+	}}
+	p := &Postgres{DB: q}
+	reg, ok, err := p.Get(context.Background(), 7)
+	if err != nil || !ok {
+		t.Fatalf("unexpected: ok=%v err=%v", ok, err)
+	}
+	if !reg.TestMode {
+		t.Fatalf("expected TestMode=true when the stored column is true, got %+v", reg)
+	}
+}
+
+func TestGetTestModeColumnIncludedInSelect(t *testing.T) {
+	q := &fakeQuerier{row: fakeRow{id: 7, userID: 3, endpoint: "https://push.example.com/send/abc123", p256dh: rawP256dh(), auth: rawAuth()}}
+	p := &Postgres{DB: q}
+	if _, _, err := p.Get(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q.sql, "test_mode") {
+		t.Fatalf("expected the SELECT column list to include test_mode, got %q", q.sql)
+	}
+}
+
+func TestListActiveTestModeColumnIncludedInSelect(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{}}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActive(context.Background(), 1); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q.sql, "test_mode") {
+		t.Fatalf("expected the SELECT column list to include test_mode, got %q", q.sql)
+	}
+}
+
+func TestRegisterTestModeColumnIncludedInReturning(t *testing.T) {
+	q := &fakeQuerier{row: fakeRow{id: 1, userID: 1, endpoint: "https://push.example.com/send/reg", p256dh: rawP256dh(), auth: rawAuth()}}
+	p := &Postgres{DB: q}
+	if _, err := p.Register(context.Background(), time.Now(), 1, validSubscription(), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q.sql, "test_mode") {
+		t.Fatalf("expected the RETURNING column list to include test_mode, got %q", q.sql)
+	}
+	if strings.Contains(q.sql, "test_mode = ") {
+		t.Fatalf("expected Register to never write test_mode (read-only per Step 8D-B Part 14A), got %q", q.sql)
 	}
 }
 

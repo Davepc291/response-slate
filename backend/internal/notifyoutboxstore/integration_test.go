@@ -868,6 +868,66 @@ func TestLiveNotificationOutboxClaimFencingRollsBack(t *testing.T) {
 		t.Fatalf("expected entryG to remain completely unchanged after the rejected direct UPDATE, got %+v", stillG)
 	}
 
+	// --- Scenario H (Step 8D-B Part 14A): RescheduleClaim -- wrong token
+	// fails with zero mutation; a requeue time past the row's own expires_at
+	// fails with zero mutation (proving the real "$2 <= expires_at" SQL
+	// comparison, which the unit-test fake cannot simulate); a valid requeue
+	// within expires_at succeeds, clears the claim, and never consumes an
+	// attempt.
+	deviceH := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-h")
+	expiresH := base.Add(time.Hour)
+	entryH, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceH), identity.UserID(userA), 3, base.Add(time.Minute), expiresH)
+	if err != nil {
+		t.Fatalf("Enqueue (scenario H) failed: %v", err)
+	}
+	claimH, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryH.ID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (H) failed: %v", err)
+	}
+	tokenH := *claimH.ClaimToken
+
+	if _, err := p.RescheduleClaim(ctx, base.Add(91*time.Second), entryH.ID, wrongToken, base.Add(10*time.Minute)); err != ErrConflict {
+		t.Fatalf("expected ErrConflict rescheduling with the wrong token, got %v", err)
+	}
+	stillClaimedH, ok, err := p.Get(ctx, entryH.ID)
+	if err != nil || !ok || !stillClaimedH.Claimed() || *stillClaimedH.ClaimToken != tokenH {
+		t.Fatalf("expected the claim to remain untouched after a wrong-token reschedule attempt, got %+v", stillClaimedH)
+	}
+
+	if _, err := p.RescheduleClaim(ctx, base.Add(92*time.Second), entryH.ID, tokenH, expiresH.Add(time.Minute)); err != ErrConflict {
+		t.Fatalf("expected ErrConflict rescheduling past the entry's own expires_at, got %v", err)
+	}
+	stillClaimedH2, ok, err := p.Get(ctx, entryH.ID)
+	if err != nil || !ok || !stillClaimedH2.Claimed() || stillClaimedH2.AttemptCount != 0 {
+		t.Fatalf("expected the claim to remain untouched after a past-expiry reschedule attempt, got %+v", stillClaimedH2)
+	}
+
+	requeueAtH := base.Add(20 * time.Minute)
+	rescheduledH, err := p.RescheduleClaim(ctx, base.Add(93*time.Second), entryH.ID, tokenH, requeueAtH)
+	if err != nil {
+		t.Fatalf("expected RescheduleClaim within expires_at to succeed, got %v", err)
+	}
+	if rescheduledH.Claimed() {
+		t.Fatal("expected claim_token to be cleared")
+	}
+	if rescheduledH.AttemptCount != 0 {
+		t.Fatalf("expected RescheduleClaim to never consume an attempt, got %+v", rescheduledH)
+	}
+	if rescheduledH.State != notifyoutbox.StatePending {
+		t.Fatalf("expected the entry to remain pending, got %+v", rescheduledH)
+	}
+	if rescheduledH.NextAttemptAt == nil || !rescheduledH.NextAttemptAt.Equal(requeueAtH) {
+		t.Fatalf("expected next_attempt_at set to the supplied requeue time, got %+v", rescheduledH.NextAttemptAt)
+	}
+
+	// A terminal (already-sent/canceled/etc.) row can never be rescheduled
+	// either, mirroring ReleaseClaim's own ErrConflict-on-terminal behavior:
+	// prove it against entryC from scenario C above, already sent.
+	arbitraryTokenH := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	if _, err := p.RescheduleClaim(ctx, base.Add(94*time.Second), entryC.ID, arbitraryTokenH, base.Add(time.Hour)); err != ErrConflict {
+		t.Fatalf("expected ErrConflict rescheduling an already-sent entry, got %v", err)
+	}
+
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
 	defer c()
 	if err := tx.Rollback(cleanup); err != nil {

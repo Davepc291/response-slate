@@ -798,6 +798,108 @@ func TestReleaseClaimNotFound(t *testing.T) {
 	}
 }
 
+// --- RescheduleClaim ---
+
+func TestRescheduleClaimUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	now := fixedNow()
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, validClaimToken(), now.Add(time.Minute)); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestRescheduleClaimRejectsInvalidInputBeforeQuerying(t *testing.T) {
+	now := fixedNow()
+	q := &fakeQuerier{}
+	p := &Postgres{DB: q}
+	if _, err := p.RescheduleClaim(context.Background(), time.Time{}, 1, validClaimToken(), now.Add(time.Minute)); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero now, got %v", err)
+	}
+	if _, err := p.RescheduleClaim(context.Background(), now, 0, validClaimToken(), now.Add(time.Minute)); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero id, got %v", err)
+	}
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, "not-a-valid-token", now.Add(time.Minute)); err != ErrInput {
+		t.Fatalf("expected ErrInput for a malformed claim token, got %v", err)
+	}
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, validClaimToken(), time.Time{}); err != ErrInput {
+		t.Fatalf("expected ErrInput for a zero nextAttemptAt, got %v", err)
+	}
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, validClaimToken(), now); err != ErrInput {
+		t.Fatalf("expected ErrInput for nextAttemptAt equal to now (not strictly after), got %v", err)
+	}
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, validClaimToken(), now.Add(-time.Minute)); err != ErrInput {
+		t.Fatalf("expected ErrInput for nextAttemptAt before now, got %v", err)
+	}
+	if len(q.calls) != 0 {
+		t.Fatal("invalid input must never reach the database")
+	}
+}
+
+func TestRescheduleClaimSuccess(t *testing.T) {
+	now := fixedNow()
+	requeueAt := now.Add(15 * time.Minute)
+	q := single(fakeRow{id: 1, eventID: validEventID(), state: "pending", maxAttempts: 3, nextAttemptAt: &requeueAt, expiresAt: now.Add(time.Hour), createdAt: now, updatedAt: now})
+	p := &Postgres{DB: q}
+	token := validClaimToken()
+	entry, err := p.RescheduleClaim(context.Background(), now, 1, token, requeueAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sql := q.calls[0].sql
+	if !strings.Contains(sql, "SET claim_token = NULL, next_attempt_at = $2") ||
+		!strings.Contains(sql, "WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid AND $2::timestamptz <= expires_at") {
+		t.Fatalf("unexpected statement shape: %q", sql)
+	}
+	if q.calls[0].args[1] != requeueAt {
+		t.Fatalf("expected the requeue time to travel as a bound parameter, got %#v", q.calls[0].args[1])
+	}
+	if q.calls[0].args[2] != token {
+		t.Fatalf("expected the claim token to travel as a bound parameter, got %#v", q.calls[0].args[2])
+	}
+	if entry.Claimed() {
+		t.Fatal("expected claim_token to be cleared on the returned entry")
+	}
+	if entry.AttemptCount != 0 {
+		t.Fatalf("expected RescheduleClaim to never touch attempt_count, got %+v", entry)
+	}
+	if entry.NextAttemptAt == nil || !entry.NextAttemptAt.Equal(requeueAt) {
+		t.Fatalf("expected next_attempt_at set to the supplied requeue time, got %+v", entry.NextAttemptAt)
+	}
+}
+
+func TestRescheduleClaimConflictOnStaleTokenOrPastExpiry(t *testing.T) {
+	// Reached whether the token is stale/superseded OR the supplied
+	// nextAttemptAt is after the row's own expires_at -- both collapse to
+	// the same ErrConflict via classifyMissingOrConflict, exactly like every
+	// other transition method. The live integration test proves the
+	// past-expiry case specifically against a real database, since this fake
+	// cannot simulate the real "$2 <= expires_at" SQL comparison.
+	now := fixedNow()
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, boolRow{}}}
+	p := &Postgres{DB: q}
+	if _, err := p.RescheduleClaim(context.Background(), now, 5, validClaimToken(), now.Add(time.Minute)); err != ErrConflict {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestRescheduleClaimNotFound(t *testing.T) {
+	now := fixedNow()
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, fakeRow{err: pgx.ErrNoRows}}}
+	p := &Postgres{DB: q}
+	if _, err := p.RescheduleClaim(context.Background(), now, 999, validClaimToken(), now.Add(time.Minute)); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRescheduleClaimDatabaseErrorFailsClosed(t *testing.T) {
+	now := fixedNow()
+	q := single(fakeRow{err: errors.New("connection reset")})
+	p := &Postgres{DB: q}
+	if _, err := p.RescheduleClaim(context.Background(), now, 1, validClaimToken(), now.Add(time.Minute)); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
 // --- newClaimToken ---
 
 func TestNewClaimTokenWellFormedAndDistinct(t *testing.T) {

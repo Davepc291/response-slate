@@ -40,6 +40,21 @@ var forbiddenImportSubstrings = []string{
 	"net/http",
 	"net/smtp",
 	"net/mail",
+	// Step 8D-B Part 14A: this pipeline must never gain a direct wiring path
+	// into notification delivery/orchestration. The AlertLookup pattern in
+	// backend/internal/notifyworker exists specifically so the orchestrator
+	// depends on this pipeline's output only through an injected caller
+	// function, never the reverse -- this pipeline must never import any of
+	// the notify-delivery family or the orchestrator itself.
+	"notifyoutbox",
+	"notifyoutboxstore",
+	"notifyrelay",
+	"notifywebpush",
+	"notifyattempt",
+	"notifypreferences",
+	"notifydelivery",
+	"notifydeliverystore",
+	"notifyworker",
 }
 
 func packageImports(t *testing.T, dir string) map[string][]string {

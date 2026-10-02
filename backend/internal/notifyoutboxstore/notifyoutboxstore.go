@@ -23,8 +23,9 @@
 // reads no GFR_NOTIFY_* environment variable.
 //
 // Enqueue, Get, MarkSent, RecordFailedAttempt, MarkExpired, and Cancel are
-// implemented (Step 8D-B Part 6). ClaimNextDue, ClaimSpecific, and
-// ReleaseClaim are implemented (Step 8D-B Part 10): a fenced claim/lease
+// implemented (Step 8D-B Part 6). ClaimNextDue, ClaimSpecific, ReleaseClaim,
+// and (as of Step 8D-B Part 14A) RescheduleClaim are implemented (Step 8D-B
+// Part 10/14A): a fenced claim/lease
 // foundation so a future worker can safely reserve one outbox row for one
 // delivery attempt at a time, and safely detect a stale, already-superseded
 // completion attempt from a worker whose lease has already been reclaimed
@@ -716,6 +717,52 @@ func (p *Postgres) ReleaseClaim(ctx context.Context, now time.Time, id notifyout
 	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET claim_token = NULL, next_attempt_at = $2
         WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid
         RETURNING `+selectColumns, int64(id), now, claimToken)
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// RescheduleClaim releases id's current claim like ReleaseClaim, but sets
+// next_attempt_at to a caller-supplied future time instead of now (Step
+// 8D-B Part 14A). It exists so a caller (the notifyworker orchestrator) can
+// requeue an entry that is ineligible for a reason expected to resolve
+// later -- quiet hours, or a dev-only worker encountering a device that is
+// not test_mode -- without either consuming an attempt via
+// RecordFailedAttempt (reserved for an actual failed provider attempt) or
+// creating a hot reclaim loop via ReleaseClaim's own always-immediate
+// semantics.
+//
+// Fenced identically to ReleaseClaim: claimToken must equal id's own
+// current claim_token, checked in the same WHERE clause as id/state. A
+// stale or already-superseded token fails closed with ErrConflict,
+// mutating nothing -- rescheduling with the wrong token can never clear a
+// different (newer) claim out from under its own owner.
+//
+// nextAttemptAt must be strictly after now (ErrInput otherwise -- a caller
+// requeuing to "now or earlier" should call ReleaseClaim instead) and must
+// not be after id's own expires_at: this is checked against the row's own
+// expires_at column in the same statement (mirroring RecordFailedAttempt's
+// own "$2::timestamptz >= expires_at" style comparison against the row's
+// live data), so a caller that fails to cap at expires_at itself is
+// rejected -- ErrConflict, exactly like every other not-currently-eligible
+// case -- rather than silently scheduling a dead attempt past the entry's
+// own expiry.
+func (p *Postgres) RescheduleClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, nextAttemptAt time.Time) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) || nextAttemptAt.IsZero() || !nextAttemptAt.After(now) {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET claim_token = NULL, next_attempt_at = $2
+        WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid AND $2::timestamptz <= expires_at
+        RETURNING `+selectColumns, int64(id), nextAttemptAt, claimToken)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

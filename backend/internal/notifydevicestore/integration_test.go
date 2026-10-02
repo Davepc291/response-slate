@@ -92,6 +92,9 @@ func TestLiveNotificationDeviceRegisterRollsBack(t *testing.T) {
 	if !first.Active() {
 		t.Fatal("expected a freshly registered device to be active")
 	}
+	if first.TestMode {
+		t.Fatal("expected a freshly registered device to default to test_mode=false")
+	}
 
 	// 2. base64url -> bytea storage is correct: read the raw column back
 	// directly (bypassing Register's own re-encoding) and compare bytes.
@@ -798,6 +801,112 @@ func TestLiveNotificationDeviceListActiveRollsBack(t *testing.T) {
 	}
 	if len(activeB) != 1 || activeB[0].ID != otherUsersDevice.ID {
 		t.Fatalf("expected userB to see exactly their own one device, got %+v", activeB)
+	}
+
+	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+	defer c()
+	if err := tx.Rollback(cleanup); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	rolledBack = true
+}
+
+// TestLiveNotificationDeviceTestModeRoundTripsRollsBack proves, against the
+// real schema, that Get/ListActive read back notification_devices.test_mode
+// (Step 8D-B Part 14A), and that Register never writes it: a device whose
+// test_mode is set to true via direct SQL (mirroring how
+// backend/cmd/sandbox-device's own raw INSERT sets it, the only write path
+// that exists for this column today) is still reported as test_mode=true
+// after a subsequent Register call for the exact same endpoint/user updates
+// every other field.
+func TestLiveNotificationDeviceTestModeRoundTripsRollsBack(t *testing.T) {
+	if os.Getenv("GFR_NOTIFY_DEVICES_LIVE_TEST") != "true" {
+		t.Skip("explicit local rollback-only database opt-in required (set GFR_NOTIFY_DEVICES_LIVE_TEST=true and GFR_DATABASE_URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, closeDB, err := Open(ctx, os.Getenv("GFR_DATABASE_URL"))
+	if err != nil {
+		t.Fatal("local notification-device-store database unavailable")
+	}
+	defer closeDB()
+	pool := db.DB.(*pgxpool.Pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("test transaction failed")
+	}
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = tx.Rollback(cleanup)
+		}
+	}()
+
+	var userID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-testmode@example.com', 'Store Test TestMode', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("fixture user insert failed: %v", err)
+	}
+
+	p := &Postgres{DB: tx}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	rawP256dh := make([]byte, 65)
+	rawP256dh[0] = 0x04
+	sub := notifydevices.Subscription{
+		Endpoint: "https://push.example.invalid/send/testmode-live",
+		Keys: notifydevices.Keys{
+			P256dh: base64.RawURLEncoding.EncodeToString(rawP256dh),
+			Auth:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+		},
+	}
+
+	// 1. Fresh registration: test_mode defaults to false, confirmed by Get.
+	reg, err := p.Register(ctx, now, identity.UserID(userID), sub, "")
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	if reg.TestMode {
+		t.Fatal("expected a freshly registered device to default to test_mode=false")
+	}
+	got, ok, err := p.Get(ctx, reg.ID)
+	if err != nil || !ok || got.TestMode {
+		t.Fatalf("expected Get to confirm test_mode=false, got ok=%v err=%v reg=%+v", ok, err, got)
+	}
+
+	// 2. Flip test_mode directly via SQL -- the only write path for this
+	// column today (mirroring cmd/sandbox-device's own raw INSERT).
+	if _, err := tx.Exec(ctx, `UPDATE notification_devices SET test_mode = true WHERE id = $1`, int64(reg.ID)); err != nil {
+		t.Fatalf("direct test_mode update failed: %v", err)
+	}
+
+	// 3. Get now reports test_mode=true.
+	gotTrue, ok, err := p.Get(ctx, reg.ID)
+	if err != nil || !ok || !gotTrue.TestMode {
+		t.Fatalf("expected Get to report test_mode=true after the direct update, got ok=%v err=%v reg=%+v", ok, err, gotTrue)
+	}
+
+	// 4. ListActive also reports test_mode=true for the same row.
+	active, err := p.ListActive(ctx, identity.UserID(userID))
+	if err != nil || len(active) != 1 || !active[0].TestMode {
+		t.Fatalf("expected ListActive to report test_mode=true, got err=%v active=%+v", err, active)
+	}
+
+	// 5. A subsequent Register call for the SAME endpoint/user (the
+	// idempotent re-registration path) must never reset test_mode back to
+	// false as a side effect of updating every other field.
+	reRegistered, err := p.Register(ctx, now.Add(time.Minute), identity.UserID(userID), sub, "android-chrome")
+	if err != nil {
+		t.Fatalf("re-registration failed: %v", err)
+	}
+	if reRegistered.ID != reg.ID {
+		t.Fatalf("expected the idempotent re-registration to update the same row, got a different id %v (original %v)", reRegistered.ID, reg.ID)
+	}
+	if !reRegistered.TestMode {
+		t.Fatal("expected re-registering an existing endpoint to never reset test_mode to false")
 	}
 
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
