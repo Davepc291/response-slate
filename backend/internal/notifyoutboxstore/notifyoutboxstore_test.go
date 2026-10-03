@@ -900,6 +900,168 @@ func TestRescheduleClaimDatabaseErrorFailsClosed(t *testing.T) {
 	}
 }
 
+// --- CancelClaimed ---
+
+func TestCancelClaimedUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestCancelClaimedRejectsInvalidInputBeforeQuerying(t *testing.T) {
+	q := &fakeQuerier{}
+	p := &Postgres{DB: q}
+	if _, err := p.CancelClaimed(context.Background(), time.Time{}, 1, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero now, got %v", err)
+	}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 0, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero id, got %v", err)
+	}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 1, "not-a-valid-token"); err != ErrInput {
+		t.Fatalf("expected ErrInput for a malformed claim token, got %v", err)
+	}
+	if len(q.calls) != 0 {
+		t.Fatal("invalid input must never reach the database")
+	}
+}
+
+func TestCancelClaimedSuccess(t *testing.T) {
+	now := fixedNow()
+	q := single(fakeRow{id: 1, eventID: validEventID(), state: "canceled", maxAttempts: 3, expiresAt: now.Add(time.Hour), createdAt: now, updatedAt: now})
+	p := &Postgres{DB: q}
+	token := validClaimToken()
+	entry, err := p.CancelClaimed(context.Background(), now, 1, token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sql := q.calls[0].sql
+	if !strings.Contains(sql, "SET state = 'canceled', next_attempt_at = NULL, claim_token = NULL") ||
+		!strings.Contains(sql, "WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid") {
+		t.Fatalf("expected a pending-and-claim-fenced direct transition to canceled, got %q", sql)
+	}
+	if q.calls[0].args[1] != token {
+		t.Fatalf("expected the claim token to travel as a bound parameter, got %#v", q.calls[0].args[1])
+	}
+	if entry.State != notifyoutbox.StateCanceled {
+		t.Fatalf("unexpected state: %+v", entry)
+	}
+	if entry.Claimed() {
+		t.Fatal("expected claim_token to be cleared on the returned entry")
+	}
+	if entry.AttemptCount != 0 {
+		t.Fatalf("expected CancelClaimed to never touch attempt_count, got %+v", entry)
+	}
+}
+
+func TestCancelClaimedConflictOnStaleTokenOrTerminalRow(t *testing.T) {
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, boolRow{}}}
+	p := &Postgres{DB: q}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 5, validClaimToken()); err != ErrConflict {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestCancelClaimedNotFound(t *testing.T) {
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, fakeRow{err: pgx.ErrNoRows}}}
+	p := &Postgres{DB: q}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 999, validClaimToken()); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestCancelClaimedDatabaseErrorFailsClosed(t *testing.T) {
+	q := single(fakeRow{err: errors.New("connection reset")})
+	p := &Postgres{DB: q}
+	if _, err := p.CancelClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+// --- DeadLetterClaimed ---
+
+func TestDeadLetterClaimedUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestDeadLetterClaimedRejectsInvalidInputBeforeQuerying(t *testing.T) {
+	q := &fakeQuerier{}
+	p := &Postgres{DB: q}
+	if _, err := p.DeadLetterClaimed(context.Background(), time.Time{}, 1, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero now, got %v", err)
+	}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 0, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero id, got %v", err)
+	}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 1, "not-a-valid-token"); err != ErrInput {
+		t.Fatalf("expected ErrInput for a malformed claim token, got %v", err)
+	}
+	if len(q.calls) != 0 {
+		t.Fatal("invalid input must never reach the database")
+	}
+}
+
+func TestDeadLetterClaimedSuccessIncrementsAttemptCountByOne(t *testing.T) {
+	now := fixedNow()
+	q := single(fakeRow{id: 1, eventID: validEventID(), state: "dead_letter", attemptCount: 2, maxAttempts: 3, expiresAt: now.Add(time.Hour), createdAt: now, updatedAt: now})
+	p := &Postgres{DB: q}
+	token := validClaimToken()
+	entry, err := p.DeadLetterClaimed(context.Background(), now, 1, token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sql := q.calls[0].sql
+	if !strings.Contains(sql, "SET state = 'dead_letter', attempt_count = attempt_count + 1, next_attempt_at = NULL, claim_token = NULL") ||
+		!strings.Contains(sql, "WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid") {
+		t.Fatalf("expected a pending-and-claim-fenced unconditional transition to dead_letter, got %q", sql)
+	}
+	if q.calls[0].args[1] != token {
+		t.Fatalf("expected the claim token to travel as a bound parameter, got %#v", q.calls[0].args[1])
+	}
+	// Deliberately confirm the ABSENCE of any expires_at comparison in the
+	// statement's own WHERE/SET clauses (expires_at legitimately appears in
+	// the trailing RETURNING column list, which every method shares):
+	// DeadLetterClaimed never checks expiry, unlike RescheduleClaim or
+	// RecordFailedAttempt -- it is an unconditional transition.
+	beforeReturning, _, _ := strings.Cut(sql, "RETURNING")
+	if strings.Contains(beforeReturning, "expires_at") {
+		t.Fatalf("expected DeadLetterClaimed's WHERE/SET clauses to never reference expires_at (unconditional transition), got %q", sql)
+	}
+	if entry.State != notifyoutbox.StateDeadLetter {
+		t.Fatalf("unexpected state: %+v", entry)
+	}
+	if entry.Claimed() {
+		t.Fatal("expected claim_token to be cleared on the returned entry")
+	}
+}
+
+func TestDeadLetterClaimedConflictOnStaleTokenOrTerminalRow(t *testing.T) {
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, boolRow{}}}
+	p := &Postgres{DB: q}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 5, validClaimToken()); err != ErrConflict {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestDeadLetterClaimedNotFound(t *testing.T) {
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, fakeRow{err: pgx.ErrNoRows}}}
+	p := &Postgres{DB: q}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 999, validClaimToken()); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestDeadLetterClaimedDatabaseErrorFailsClosed(t *testing.T) {
+	q := single(fakeRow{err: errors.New("connection reset")})
+	p := &Postgres{DB: q}
+	if _, err := p.DeadLetterClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
 // --- newClaimToken ---
 
 func TestNewClaimTokenWellFormedAndDistinct(t *testing.T) {

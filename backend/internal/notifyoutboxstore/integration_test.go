@@ -928,6 +928,139 @@ func TestLiveNotificationOutboxClaimFencingRollsBack(t *testing.T) {
 		t.Fatalf("expected ErrConflict rescheduling an already-sent entry, got %v", err)
 	}
 
+	// --- Scenario I (Step 8D-B Part 14B): CancelClaimed -- wrong token fails
+	// with zero mutation; correct token transitions directly from
+	// claimed/pending to canceled in one statement, with no observable
+	// unclaimed-but-still-pending intermediate state; a terminal row can
+	// never be CancelClaimed'd either.
+	deviceI := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-i")
+	entryI, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceI), identity.UserID(userA), 3, base.Add(time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Enqueue (scenario I) failed: %v", err)
+	}
+	claimI, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryI.ID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (I) failed: %v", err)
+	}
+	tokenI := *claimI.ClaimToken
+
+	if _, err := p.CancelClaimed(ctx, base.Add(91*time.Second), entryI.ID, wrongToken); err != ErrConflict {
+		t.Fatalf("expected ErrConflict canceling with the wrong token, got %v", err)
+	}
+	stillClaimedI, ok, err := p.Get(ctx, entryI.ID)
+	if err != nil || !ok || !stillClaimedI.Claimed() || *stillClaimedI.ClaimToken != tokenI || stillClaimedI.State != notifyoutbox.StatePending {
+		t.Fatalf("expected the claim to remain untouched after a wrong-token CancelClaimed attempt, got %+v", stillClaimedI)
+	}
+
+	canceledI, err := p.CancelClaimed(ctx, base.Add(92*time.Second), entryI.ID, tokenI)
+	if err != nil {
+		t.Fatalf("expected CancelClaimed with the correct token to succeed, got %v", err)
+	}
+	if canceledI.State != notifyoutbox.StateCanceled {
+		t.Fatalf("expected state=canceled, got %+v", canceledI)
+	}
+	if canceledI.Claimed() {
+		t.Fatal("expected claim_token to be cleared")
+	}
+	if canceledI.AttemptCount != 0 {
+		t.Fatalf("expected CancelClaimed to never touch attempt_count, got %+v", canceledI)
+	}
+	if canceledI.NextAttemptAt != nil {
+		t.Fatalf("expected next_attempt_at cleared on a terminal transition, got %+v", canceledI.NextAttemptAt)
+	}
+	if _, err := p.CancelClaimed(ctx, base.Add(93*time.Second), entryI.ID, arbitraryTokenH); err != ErrConflict {
+		t.Fatalf("expected ErrConflict canceling an already-canceled entry, got %v", err)
+	}
+
+	// --- Scenario J (Step 8D-B Part 14B): DeadLetterClaimed -- wrong token
+	// fails with zero mutation; correct token transitions directly from
+	// claimed/pending to dead_letter, incrementing attempt_count by exactly
+	// one, UNCONDITIONALLY (even when expires_at has already passed, and
+	// even when attempt_count is already one below max_attempts); a
+	// terminal row can never be DeadLetterClaimed'd either.
+	deviceJ := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-j")
+	entryJ, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceJ), identity.UserID(userA), 3, base.Add(time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Enqueue (scenario J) failed: %v", err)
+	}
+	claimJ, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryJ.ID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (J) failed: %v", err)
+	}
+	tokenJ := *claimJ.ClaimToken
+
+	if _, err := p.DeadLetterClaimed(ctx, base.Add(91*time.Second), entryJ.ID, wrongToken); err != ErrConflict {
+		t.Fatalf("expected ErrConflict dead-lettering with the wrong token, got %v", err)
+	}
+	stillClaimedJ, ok, err := p.Get(ctx, entryJ.ID)
+	if err != nil || !ok || !stillClaimedJ.Claimed() || stillClaimedJ.AttemptCount != 0 {
+		t.Fatalf("expected the claim to remain untouched after a wrong-token DeadLetterClaimed attempt, got %+v", stillClaimedJ)
+	}
+
+	deadJ, err := p.DeadLetterClaimed(ctx, base.Add(92*time.Second), entryJ.ID, tokenJ)
+	if err != nil {
+		t.Fatalf("expected DeadLetterClaimed with the correct token to succeed, got %v", err)
+	}
+	if deadJ.State != notifyoutbox.StateDeadLetter || deadJ.AttemptCount != 1 {
+		t.Fatalf("expected state=dead_letter with attempt_count=1, got %+v", deadJ)
+	}
+	if deadJ.Claimed() {
+		t.Fatal("expected claim_token to be cleared")
+	}
+	if deadJ.NextAttemptAt != nil {
+		t.Fatalf("expected next_attempt_at cleared on a terminal transition, got %+v", deadJ.NextAttemptAt)
+	}
+	if _, err := p.DeadLetterClaimed(ctx, base.Add(93*time.Second), entryJ.ID, arbitraryTokenH); err != ErrConflict {
+		t.Fatalf("expected ErrConflict dead-lettering an already-dead-lettered entry, got %v", err)
+	}
+
+	// Unconditional-even-past-expiry proof: a fresh entry whose expires_at
+	// has already passed by the time DeadLetterClaimed runs still
+	// transitions to dead_letter, never 'expired' -- unlike
+	// RecordFailedAttempt's own expiry-priority CASE, this primitive has no
+	// expiry check at all (Part 14B design lock: unauthorized/permanent
+	// failures terminalize immediately and unconditionally).
+	deviceJ2 := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-j2")
+	expiresSoonJ2 := base.Add(10 * time.Minute)
+	entryJ2, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceJ2), identity.UserID(userA), 3, base.Add(time.Minute), expiresSoonJ2)
+	if err != nil {
+		t.Fatalf("Enqueue (scenario J2) failed: %v", err)
+	}
+	claimJ2, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryJ2.ID, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (J2) failed: %v", err)
+	}
+	// now (expiresSoonJ2.Add(time.Minute)) is well past entryJ2's own
+	// expires_at, yet DeadLetterClaimed still succeeds and still produces
+	// dead_letter, never expired.
+	deadJ2, err := p.DeadLetterClaimed(ctx, expiresSoonJ2.Add(time.Minute), entryJ2.ID, *claimJ2.ClaimToken)
+	if err != nil {
+		t.Fatalf("expected DeadLetterClaimed to succeed unconditionally even past expires_at, got %v", err)
+	}
+	if deadJ2.State != notifyoutbox.StateDeadLetter {
+		t.Fatalf("expected dead_letter even past expires_at (unconditional transition), got %+v", deadJ2)
+	}
+
+	// Attempt-count-bound proof: max_attempts=1, attempt_count starts at 0
+	// (one below the ceiling); DeadLetterClaimed's +1 lands exactly at
+	// max_attempts, never violating notification_outbox_attempt_count_bounded.
+	deviceJ3 := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-j3")
+	entryJ3, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceJ3), identity.UserID(userA), 1, base.Add(time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Enqueue (scenario J3) failed: %v", err)
+	}
+	claimJ3, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryJ3.ID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (J3) failed: %v", err)
+	}
+	deadJ3, err := p.DeadLetterClaimed(ctx, base.Add(91*time.Second), entryJ3.ID, *claimJ3.ClaimToken)
+	if err != nil {
+		t.Fatalf("expected DeadLetterClaimed to succeed exactly at max_attempts, got %v", err)
+	}
+	if deadJ3.AttemptCount != 1 || deadJ3.MaxAttempts != 1 {
+		t.Fatalf("expected attempt_count to reach exactly max_attempts (1), got %+v", deadJ3)
+	}
+
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
 	defer c()
 	if err := tx.Rollback(cleanup); err != nil {

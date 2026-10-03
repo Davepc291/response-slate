@@ -1,10 +1,10 @@
 // Package notifyworker is the Step 8D-B Part 14A notification delivery
-// orchestrator: the single new component that composes every already-built,
-// separately-authorized notify-family package (notifyoutboxstore,
-// notifyattempt, notifypreferences, notifyrelay, notifywebpush,
-// notifydeliverystore, notifydevicestore) into one claim -> evaluate ->
-// plan -> send -> record-outcome -> release cycle, per the approved Step
-// 8D-B Part 14A design lock.
+// orchestrator (hardened in Part 14B): the single new component that
+// composes every already-built, separately-authorized notify-family package
+// (notifyoutboxstore, notifyattempt, notifypreferences, notifyrelay,
+// notifywebpush, notifydevicestore, and -- as of Part 14B -- notifyoutcome)
+// into one claim -> evaluate -> plan -> send -> record-outcome -> release
+// cycle, per the approved Step 8D-B Part 14A/14B design locks.
 //
 // This part is locked to a single, deliberately narrow scope, enforced
 // structurally, not only by caller discipline:
@@ -59,6 +59,19 @@ import (
 	"greenwich-fire-responder/backend/internal/notifywebpush"
 )
 
+// Step 8D-B Part 14B hardening: MarkSent, RecordFailedAttempt's audit
+// pairing, Cancel, and device revocation for an unauthorized outcome all
+// moved into backend/internal/notifyoutcome, which commits each outbox
+// transition atomically with its own notification_deliveries row (and, for
+// an unauthorized outcome, the device revocation too) in one PostgreSQL
+// transaction. This package no longer calls notifyoutboxstore.MarkSent/
+// RecordFailedAttempt/Cancel or notifydevicestore.Revoke directly -- it
+// calls the OutcomeRecorder interface below instead, which notifyoutcome.Store
+// satisfies. The non-transactional, single-statement operations
+// (ClaimNextDue, RescheduleClaim, ReleaseClaim, MarkExpired, and a plain
+// device Get) are unchanged and still called directly, since there is
+// nothing to make atomic about a single statement that writes no audit row.
+
 // Default tuning values, used by New whenever the corresponding Config field
 // is left at its zero value. None of these is a claim about what a future,
 // wider-scoped part should use -- they are this dev-only slice's own
@@ -100,7 +113,10 @@ var (
 	ErrInput = errors.New("notifyworker: invalid configuration")
 )
 
-// OutboxStore is the minimal notifyoutboxstore surface a Worker needs.
+// OutboxStore is the minimal notifyoutboxstore surface a Worker needs for
+// its non-transactional, single-statement operations only (Step 8D-B Part
+// 14B: MarkSent/RecordFailedAttempt/Cancel moved to OutcomeRecorder below,
+// since those now always commit atomically with their own audit row).
 // Declared locally (rather than depending on the concrete
 // *notifyoutboxstore.Postgres type) so this package is testable with a
 // simple fake, exactly mirroring notifyattempt.Evaluator's own convention.
@@ -108,24 +124,33 @@ type OutboxStore interface {
 	ClaimNextDue(ctx context.Context, now time.Time, lease time.Duration) (notifyoutbox.Entry, bool, error)
 	RescheduleClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, nextAttemptAt time.Time) (notifyoutbox.Entry, error)
 	ReleaseClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error)
-	MarkSent(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error)
-	RecordFailedAttempt(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, nextAttemptAt time.Time, claimToken string) (notifyoutbox.Entry, error)
-	Cancel(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error)
 	MarkExpired(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error)
 }
 
 // DeviceStore is the minimal notifydevicestore surface a Worker needs: a
-// fresh, never-cached TestMode/Active read before ever considering a send,
-// and the ability to revoke a device whose subscription a push service has
-// reported as unauthorized/gone.
+// fresh, never-cached TestMode/Active read before ever considering a send.
+// Revoke moved to OutcomeRecorder (Step 8D-B Part 14B): an unauthorized
+// outcome's device revocation now happens inside the same atomic transaction
+// as the outbox terminalization and audit insert, not as a separate call
+// this package makes directly.
 type DeviceStore interface {
 	Get(ctx context.Context, id notifydevices.DeviceID) (notifydevices.Registration, bool, error)
-	Revoke(ctx context.Context, now time.Time, userID identity.UserID, id notifydevices.DeviceID) error
 }
 
-// DeliveryStore is the minimal notifydeliverystore surface a Worker needs.
-type DeliveryStore interface {
-	Record(ctx context.Context, d notifydelivery.Delivery) (notifydelivery.Delivery, error)
+// OutcomeRecorder is the minimal backend/internal/notifyoutcome.Store
+// surface a Worker needs: every outcome that writes both
+// notification_outbox and notification_deliveries (and, for an unauthorized
+// outcome, notification_devices too) goes through here instead of through
+// OutboxStore/DeviceStore directly, so each outcome commits atomically in
+// one PostgreSQL transaction (Step 8D-B Part 14B). Declared locally so this
+// package is testable with a simple fake, exactly mirroring every other
+// interface in this file.
+type OutcomeRecorder interface {
+	RecordSent(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error)
+	RecordCanceled(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error)
+	RecordFailedAttempt(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, nextAttemptAt time.Time, claimToken string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error)
+	RecordDeadLetter(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error)
+	RecordUnauthorized(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, d notifydelivery.Delivery, userID identity.UserID, deviceID notifydevices.DeviceID) (notifyoutbox.Entry, notifydelivery.Delivery, error)
 }
 
 // AlertData carries both the eligibility-evaluation context and the
@@ -150,12 +175,16 @@ type AlertLookup func(ctx context.Context, eventID string) (AlertData, error)
 // Deps carries every dependency a Worker needs. Every field is required;
 // New refuses to construct a Worker if any is nil (ErrUnconfigured).
 type Deps struct {
-	Outbox     OutboxStore
-	Evaluator  notifyattempt.Evaluator
-	Devices    DeviceStore
-	Sender     notifyrelay.Sender
-	Deliveries DeliveryStore
-	Alerts     AlertLookup
+	Outbox    OutboxStore
+	Evaluator notifyattempt.Evaluator
+	Devices   DeviceStore
+	Sender    notifyrelay.Sender
+	// Outcomes replaces the Part 14A Deliveries field (Step 8D-B Part 14B):
+	// every outcome that writes both notification_outbox and
+	// notification_deliveries now goes through here, atomically, instead of
+	// through two separate non-transactional calls.
+	Outcomes OutcomeRecorder
+	Alerts   AlertLookup
 	// Now returns the current time. Defaults to time.Now when nil; a test
 	// supplies a fake clock instead.
 	Now func() time.Time
@@ -200,7 +229,7 @@ type Worker struct {
 // claimed in that state.
 func New(deps Deps, cfg Config) (*Worker, error) {
 	if deps.Outbox == nil || deps.Evaluator == nil || deps.Devices == nil ||
-		deps.Sender == nil || deps.Deliveries == nil || deps.Alerts == nil {
+		deps.Sender == nil || deps.Outcomes == nil || deps.Alerts == nil {
 		return nil, ErrUnconfigured
 	}
 	if cfg.Env != notifywebpush.EnvDev {
@@ -387,38 +416,26 @@ func (w *Worker) handleNotPlannable(ctx context.Context, now time.Time, entry no
 	return nil
 }
 
-// cancel resolves an ActionCancel plan: release the claim, then Cancel (which
-// structurally requires an unclaimed row), then record the audit outcome.
-// Both outbox-store calls are fenced; the audit write happens only if both
-// succeed (Part 14A design lock Section 9): a fencing conflict on either
-// call causes zero further action from this worker.
+// cancel resolves an ActionCancel plan via notifyoutcome.Store.RecordCanceled
+// (Step 8D-B Part 14B): one atomic call runs notifyoutboxstore.CancelClaimed
+// (a direct claimed-pending-to-canceled transition, no ReleaseClaim step at
+// all) and the audit insert together, committing both or neither. A fencing
+// conflict causes zero further action from this worker, exactly as before.
 func (w *Worker) cancel(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan) error {
-	if _, err := w.deps.Outbox.ReleaseClaim(ctx, now, entry.ID, claimToken); err != nil {
-		if errors.Is(err, notifyoutboxstore.ErrConflict) {
-			return nil
-		}
-		return err
-	}
-	if _, err := w.deps.Outbox.Cancel(ctx, now, entry.ID); err != nil {
-		if errors.Is(err, notifyoutboxstore.ErrConflict) {
-			// Narrow, accepted race: a different reclaim landed between this
-			// worker's own ReleaseClaim and Cancel calls. The entry's
-			// eventual terminal state is still correct -- whoever now holds
-			// it will reach its own conclusion -- but this worker writes no
-			// audit row for it. Unreachable under this part's single-worker
-			// scope; see the Part 14A design lock's own flagged limitation.
-			return nil
-		}
-		return err
-	}
-	_, err := w.deps.Deliveries.Record(ctx, notifydelivery.Delivery{
+	_, _, err := w.deps.Outcomes.RecordCanceled(ctx, now, entry.ID, claimToken, notifydelivery.Delivery{
 		OutboxID:      entry.ID,
 		EventID:       entry.EventID,
 		DeviceID:      entry.DeviceID,
 		Outcome:       notifydelivery.OutcomeCanceled,
 		AttemptNumber: plan.AttemptNumber,
 	})
-	return err
+	if err != nil {
+		if errors.Is(err, notifyoutboxstore.ErrConflict) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // send resolves an ActionSend plan: construct the relay Request from the
@@ -449,8 +466,10 @@ func (w *Worker) send(ctx context.Context, now time.Time, entry notifyoutbox.Ent
 	switch result.Outcome {
 	case notifyrelay.OutcomeAccepted:
 		return w.recordAccepted(ctx, now, entry, claimToken, plan)
-	case notifyrelay.OutcomeTemporaryFailure, notifyrelay.OutcomePermanentFailure:
-		return w.recordFailedAttempt(ctx, now, entry, claimToken, plan, result)
+	case notifyrelay.OutcomeTemporaryFailure:
+		return w.recordTemporaryFailure(ctx, now, entry, claimToken, plan, result)
+	case notifyrelay.OutcomePermanentFailure:
+		return w.recordPermanentFailure(ctx, now, entry, claimToken, plan, result)
 	case notifyrelay.OutcomeUnauthorized:
 		return w.recordUnauthorized(ctx, now, entry, claimToken, plan)
 	default:
@@ -458,113 +477,120 @@ func (w *Worker) send(ctx context.Context, now time.Time, entry notifyoutbox.Ent
 	}
 }
 
-// recordAccepted resolves an OutcomeAccepted send: MarkSent, then record the
-// audit row. This package does not claim exactly-once Web Push delivery
-// (Part 14A design lock Decision 10 / flag 1): if this process crashes after
-// Sender.Send has already returned OutcomeAccepted but before MarkSent (or
-// the following Record call) commits, the claim's lease eventually expires
-// and a future ClaimNextDue reclaims the same entry, which can cause a
-// genuine duplicate physical push with no corresponding duplicate-detection
-// in this schema. leaseDuration only bounds how long this window can last;
-// it does not close it.
+// recordAccepted resolves an OutcomeAccepted send via
+// notifyoutcome.Store.RecordSent (Step 8D-B Part 14B): one atomic call runs
+// MarkSent and the audit insert together. This package still does not claim
+// exactly-once Web Push delivery (Part 14A design lock Decision 10 / flag
+// 1): if this process crashes after Sender.Send has already returned
+// OutcomeAccepted but before RecordSent's transaction commits, the claim's
+// lease eventually expires and a future ClaimNextDue reclaims the same
+// entry, which can cause a genuine duplicate physical push with no
+// corresponding duplicate-detection in this schema. Atomicity closes the
+// narrower sub-case where MarkSent committed but its audit row never did; it
+// does not and cannot close the fundamental "the provider already has the
+// message before any local commit happens at all" window. leaseDuration
+// only bounds how long that window can last; it does not close it.
 func (w *Worker) recordAccepted(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan) error {
-	if _, err := w.deps.Outbox.MarkSent(ctx, now, entry.ID, claimToken); err != nil {
-		if errors.Is(err, notifyoutboxstore.ErrConflict) {
-			return nil
-		}
-		return err
-	}
-	_, err := w.deps.Deliveries.Record(ctx, notifydelivery.Delivery{
+	_, _, err := w.deps.Outcomes.RecordSent(ctx, now, entry.ID, claimToken, notifydelivery.Delivery{
 		OutboxID:      entry.ID,
 		EventID:       entry.EventID,
 		DeviceID:      entry.DeviceID,
 		Outcome:       notifydelivery.OutcomeSent,
 		AttemptNumber: plan.AttemptNumber,
 	})
-	return err
-}
-
-// recordFailedAttempt resolves an OutcomeTemporaryFailure or
-// OutcomePermanentFailure send identically (Part 14A design lock Decision
-// 7): both call RecordFailedAttempt with the same bounded backoff schedule,
-// letting the outbox's own existing attempt-exhaustion machinery decide
-// pending/dead_letter/expired. This package deliberately adds no fast
-// dead-letter path for a permanent failure: doing so would require a new,
-// unfenced-adjacent mutation this design lock explicitly declined to add.
-func (w *Worker) recordFailedAttempt(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan, result notifyrelay.Result) error {
-	nextAttemptAt := now.Add(BackoffDelay(plan.AttemptNumber, w.cfg.BaseRetryDelay, w.cfg.MaxRetryDelay, result.RetryAfter))
-	if nextAttemptAt.After(entry.ExpiresAt) {
-		nextAttemptAt = entry.ExpiresAt
-	}
-
-	updated, err := w.deps.Outbox.RecordFailedAttempt(ctx, now, entry.ID, nextAttemptAt, claimToken)
 	if err != nil {
 		if errors.Is(err, notifyoutboxstore.ErrConflict) {
 			return nil
 		}
 		return err
 	}
+	return nil
+}
 
-	outcome, ok := deliveryOutcomeFor(updated.State)
-	if !ok {
-		return fmt.Errorf("notifyworker: unexpected outbox state %q after RecordFailedAttempt", updated.State)
+// recordTemporaryFailure resolves an OutcomeTemporaryFailure send via
+// notifyoutcome.Store.RecordFailedAttempt (Step 8D-B Part 14B): one atomic
+// call runs the existing, UNCHANGED notifyoutboxstore.RecordFailedAttempt
+// (same bounded backoff schedule, same pending/dead_letter/expired CASE) and
+// the audit insert together, the audit outcome always derived from the
+// transition's ACTUAL returned state.
+func (w *Worker) recordTemporaryFailure(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan, result notifyrelay.Result) error {
+	nextAttemptAt := now.Add(BackoffDelay(plan.AttemptNumber, w.cfg.BaseRetryDelay, w.cfg.MaxRetryDelay, result.RetryAfter))
+	if nextAttemptAt.After(entry.ExpiresAt) {
+		nextAttemptAt = entry.ExpiresAt
 	}
-	_, err = w.deps.Deliveries.Record(ctx, notifydelivery.Delivery{
+
+	_, _, err := w.deps.Outcomes.RecordFailedAttempt(ctx, now, entry.ID, nextAttemptAt, claimToken, notifydelivery.Delivery{
 		OutboxID:      entry.ID,
 		EventID:       entry.EventID,
 		DeviceID:      entry.DeviceID,
-		Outcome:       outcome,
 		AttemptNumber: plan.AttemptNumber,
+		ErrorCode:     result.Code,
+		// Outcome deliberately left zero-value: notifyoutcome.RecordFailedAttempt
+		// derives and overwrites it from the actual returned outbox state.
 	})
-	return err
-}
-
-// recordUnauthorized resolves an OutcomeUnauthorized send: release the
-// claim, revoke the device immediately (idempotent, best-effort), then
-// record the audit row (Part 14A design lock Decision 8 / Section 3). The
-// entry itself is left pending and immediately reclaimable: no-resend is
-// guaranteed not by a special outbox transition but by
-// notifypreferences.Evaluate's own fresh-every-call device-active check --
-// once Revoke commits, every future Evaluate call for this device observes
-// ReasonDeviceNotActive before Sender.Send could ever be reached again, and
-// the standard ActionCancel path (see cancel) terminates the entry on its
-// next claim cycle.
-func (w *Worker) recordUnauthorized(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan) error {
-	if _, err := w.deps.Outbox.ReleaseClaim(ctx, now, entry.ID, claimToken); err != nil {
+	if err != nil {
 		if errors.Is(err, notifyoutboxstore.ErrConflict) {
 			return nil
 		}
 		return err
 	}
-	revokeErr := w.deps.Devices.Revoke(ctx, now, entry.UserID, entry.DeviceID)
-	_, recordErr := w.deps.Deliveries.Record(ctx, notifydelivery.Delivery{
+	return nil
+}
+
+// recordPermanentFailure resolves an OutcomePermanentFailure send via
+// notifyoutcome.Store.RecordDeadLetter (Step 8D-B Part 14B): one atomic call
+// runs the new notifyoutboxstore.DeadLetterClaimed -- an immediate,
+// unconditional claimed-pending-to-dead_letter transition, attempt_count
+// incremented by exactly one -- and the audit insert (OutcomeDeadLetter)
+// together. Unlike a temporary failure, this never retries: a malformed
+// payload or rejected VAPID configuration will fail identically on every
+// retry, so there is no reason to burn attempts or wall-clock time against
+// max_attempts before making it visible to an administrator.
+func (w *Worker) recordPermanentFailure(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan, result notifyrelay.Result) error {
+	_, _, err := w.deps.Outcomes.RecordDeadLetter(ctx, now, entry.ID, claimToken, notifydelivery.Delivery{
+		OutboxID:      entry.ID,
+		EventID:       entry.EventID,
+		DeviceID:      entry.DeviceID,
+		Outcome:       notifydelivery.OutcomeDeadLetter,
+		AttemptNumber: plan.AttemptNumber,
+		ErrorCode:     result.Code,
+	})
+	if err != nil {
+		if errors.Is(err, notifyoutboxstore.ErrConflict) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// recordUnauthorized resolves an OutcomeUnauthorized send via
+// notifyoutcome.Store.RecordUnauthorized (Step 8D-B Part 14B): one atomic
+// call runs the same DeadLetterClaimed primitive, the audit insert
+// (OutcomeUnauthorized), and the device revocation together -- no
+// ReleaseClaim, no next-cycle cleanup. The entry is immediately,
+// atomically terminal: it can never be claimed or sent to again regardless
+// of the device's own state. No-resend to OTHER, still-pending entries
+// targeting the same device is additionally guaranteed by
+// notifypreferences.Evaluate's own fresh-every-call device-active check --
+// once the revocation commits, every future Evaluate call for this device
+// observes ReasonDeviceNotActive before Sender.Send could ever be reached
+// again for any of them.
+func (w *Worker) recordUnauthorized(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string, plan notifyattempt.Plan) error {
+	_, _, err := w.deps.Outcomes.RecordUnauthorized(ctx, now, entry.ID, claimToken, notifydelivery.Delivery{
 		OutboxID:      entry.ID,
 		EventID:       entry.EventID,
 		DeviceID:      entry.DeviceID,
 		Outcome:       notifydelivery.OutcomeUnauthorized,
 		AttemptNumber: plan.AttemptNumber,
-	})
-	if recordErr != nil {
-		return recordErr
+	}, entry.UserID, entry.DeviceID)
+	if err != nil {
+		if errors.Is(err, notifyoutboxstore.ErrConflict) {
+			return nil
+		}
+		return err
 	}
-	return revokeErr
-}
-
-// deliveryOutcomeFor maps the notifyoutbox.State RecordFailedAttempt
-// actually returned to the matching notifydelivery.Outcome. The caller must
-// use the ACTUAL returned state, never assume which of the three branches
-// RecordFailedAttempt's own CASE expression took.
-func deliveryOutcomeFor(state notifyoutbox.State) (notifydelivery.Outcome, bool) {
-	switch state {
-	case notifyoutbox.StatePending:
-		return notifydelivery.OutcomeFailed, true
-	case notifyoutbox.StateDeadLetter:
-		return notifydelivery.OutcomeDeadLetter, true
-	case notifyoutbox.StateExpired:
-		return notifydelivery.OutcomeExpired, true
-	default:
-		return "", false
-	}
+	return nil
 }
 
 // BackoffDelay computes the Part 14A design lock's bounded exponential

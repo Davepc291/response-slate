@@ -25,19 +25,27 @@
 // Enqueue, Get, MarkSent, RecordFailedAttempt, MarkExpired, and Cancel are
 // implemented (Step 8D-B Part 6). ClaimNextDue, ClaimSpecific, ReleaseClaim,
 // and (as of Step 8D-B Part 14A) RescheduleClaim are implemented (Step 8D-B
-// Part 10/14A): a fenced claim/lease
-// foundation so a future worker can safely reserve one outbox row for one
-// delivery attempt at a time, and safely detect a stale, already-superseded
-// completion attempt from a worker whose lease has already been reclaimed
-// by someone else. Claiming itself performs no side effect beyond stamping
-// claim_token/next_attempt_at: it never increments attempt_count, never
-// writes notification_deliveries, never evaluates eligibility, and never
-// sends anything -- all of that remains the future, separately authorized
+// Part 10/14A): a fenced claim/lease foundation so a future worker can
+// safely reserve one outbox row for one delivery attempt at a time, and
+// safely detect a stale, already-superseded completion attempt from a
+// worker whose lease has already been reclaimed by someone else. Claiming
+// itself performs no side effect beyond stamping claim_token/
+// next_attempt_at: it never increments attempt_count, never writes
+// notification_deliveries, never evaluates eligibility, and never sends
+// anything -- all of that remains the future, separately authorized
 // worker/orchestration component's job. notification_deliveries itself is
 // deliberately deferred to its own, already-built, separate package
 // (notifydeliverystore): it is a distinct table with distinct (hard
 // immutable/append-only) semantics, not something this mutable-state-machine
 // package should also own.
+//
+// CancelClaimed and DeadLetterClaimed are implemented (Step 8D-B Part 14B):
+// direct, single-statement, claim-fenced transitions straight from
+// claimed/pending to a terminal state, with no ReleaseClaim intermediate
+// step and therefore no window where a second worker could reclaim the row
+// between release and terminalization. These exist specifically so
+// backend/internal/notifyoutcome's atomic outcome-recording methods never
+// need more than one notifyoutboxstore call per outcome.
 package notifyoutboxstore
 
 import (
@@ -763,6 +771,83 @@ func (p *Postgres) RescheduleClaim(ctx context.Context, now time.Time, id notify
 	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET claim_token = NULL, next_attempt_at = $2
         WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid AND $2::timestamptz <= expires_at
         RETURNING `+selectColumns, int64(id), nextAttemptAt, claimToken)
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// CancelClaimed transitions a currently-claimed pending entry directly to
+// canceled, fenced on claim_token, in one statement (Step 8D-B Part 14B) --
+// no intermediate unclaimed window for a second worker to reclaim through,
+// unlike the ReleaseClaim-then-Cancel sequence a caller would otherwise need
+// (Cancel itself only ever operates on an already-unclaimed row). A stale or
+// already-superseded token fails closed with ErrConflict, mutating nothing,
+// exactly like every other fenced transition method; an unknown id fails
+// closed with ErrNotFound, and an already-terminal id fails closed with
+// ErrConflict too. next_attempt_at is cleared to NULL: a canceled entry has
+// no next attempt, identical to Cancel's own existing behavior.
+func (p *Postgres) CancelClaimed(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'canceled', next_attempt_at = NULL, claim_token = NULL
+        WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid
+        RETURNING `+selectColumns, int64(id), claimToken)
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// DeadLetterClaimed unconditionally transitions a currently-claimed pending
+// entry to dead_letter, incrementing attempt_count by exactly one, fenced on
+// claim_token, in one statement (Step 8D-B Part 14B). Unlike
+// RecordFailedAttempt's own CASE expression, this never checks expires_at or
+// attempt_count against max_attempts: it is for outcomes that are
+// immediately and unconditionally terminal regardless of attempts remaining
+// or expiry having passed -- a provider-reported unauthorized/gone
+// subscription, and a provider-reported permanent (non-retryable) failure
+// (malformed payload, rejected VAPID configuration). Both outcomes reuse
+// this exact same primitive; only the notifydelivery.Outcome a caller
+// records afterward differs (OutcomeUnauthorized vs OutcomeDeadLetter) --
+// this method itself has no opinion on why it was called.
+//
+// Incrementing attempt_count is always safe here: a currently-pending row's
+// attempt_count is always already strictly less than max_attempts (every
+// other transition method's own invariant already guarantees this -- a row
+// can never stay pending once attempt_count reaches max_attempts), so
+// count+1 can never violate notification_outbox_attempt_count_bounded.
+//
+// As with every other fenced transition method, a stale or
+// already-superseded claim_token fails closed with ErrConflict, mutating
+// nothing; an unknown id fails closed with ErrNotFound; an already-terminal
+// id fails closed with ErrConflict too. next_attempt_at is cleared to NULL:
+// a dead-lettered entry has no next attempt.
+func (p *Postgres) DeadLetterClaimed(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox
+        SET state = 'dead_letter', attempt_count = attempt_count + 1, next_attempt_at = NULL, claim_token = NULL
+        WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid
+        RETURNING `+selectColumns, int64(id), claimToken)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

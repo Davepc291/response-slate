@@ -54,6 +54,7 @@ var forbiddenImportSubstrings = []string{
 	"notifydelivery",
 	"notifydeliverystore",
 	"notifyworker",
+	"notifyoutcome",
 }
 
 func packageImports(t *testing.T, dir string) map[string][]string {

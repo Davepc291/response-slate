@@ -83,6 +83,21 @@ func deviceNotActiveDecision() notifypreferences.Decision {
 	return notifypreferences.Decision{Eligible: false, Reason: notifypreferences.ReasonDeviceNotActive}
 }
 
+// deliveryOutcomeForStateTest mirrors notifyoutcome's own unexported
+// deliveryOutcomeForState mapping, duplicated locally so fakeOutcomes can
+// simulate what the real atomic RecordFailedAttempt would derive, without
+// this test package depending on notifyoutcome's internals.
+func deliveryOutcomeForStateTest(state notifyoutbox.State) notifydelivery.Outcome {
+	switch state {
+	case notifyoutbox.StateDeadLetter:
+		return notifydelivery.OutcomeDeadLetter
+	case notifyoutbox.StateExpired:
+		return notifydelivery.OutcomeExpired
+	default:
+		return notifydelivery.OutcomeFailed
+	}
+}
+
 // --- fakeEvaluator ---
 
 type fakeEvaluator struct {
@@ -103,37 +118,11 @@ type fakeDeviceStore struct {
 	ok       bool
 	getErr   error
 	getCalls int
-
-	revokeErr   error
-	revokeCalls []struct {
-		userID identity.UserID
-		id     notifydevices.DeviceID
-	}
 }
 
 func (f *fakeDeviceStore) Get(context.Context, notifydevices.DeviceID) (notifydevices.Registration, bool, error) {
 	f.getCalls++
 	return f.reg, f.ok, f.getErr
-}
-
-func (f *fakeDeviceStore) Revoke(_ context.Context, _ time.Time, userID identity.UserID, id notifydevices.DeviceID) error {
-	f.revokeCalls = append(f.revokeCalls, struct {
-		userID identity.UserID
-		id     notifydevices.DeviceID
-	}{userID, id})
-	return f.revokeErr
-}
-
-// --- fakeDeliveryStore ---
-
-type fakeDeliveryStore struct {
-	err     error
-	records []notifydelivery.Delivery
-}
-
-func (f *fakeDeliveryStore) Record(_ context.Context, d notifydelivery.Delivery) (notifydelivery.Delivery, error) {
-	f.records = append(f.records, d)
-	return d, f.err
 }
 
 // --- fakeAlerts ---
@@ -142,7 +131,7 @@ func fixedAlerts(data AlertData, err error) AlertLookup {
 	return func(context.Context, string) (AlertData, error) { return data, err }
 }
 
-// --- fakeOutbox ---
+// --- fakeOutbox (non-transactional operations only, post-Part 14B) ---
 
 type rescheduleCall struct {
 	id    notifyoutbox.OutboxID
@@ -151,15 +140,6 @@ type rescheduleCall struct {
 }
 type releaseCall struct {
 	id    notifyoutbox.OutboxID
-	token string
-}
-type markSentCall struct {
-	id    notifyoutbox.OutboxID
-	token string
-}
-type recordFailedCall struct {
-	id    notifyoutbox.OutboxID
-	next  time.Time
 	token string
 }
 
@@ -174,16 +154,6 @@ type fakeOutbox struct {
 
 	releaseErr   error
 	releaseCalls []releaseCall
-
-	markSentErr   error
-	markSentCalls []markSentCall
-
-	recordFailedResult notifyoutbox.Entry
-	recordFailedErr    error
-	recordFailedCalls  []recordFailedCall
-
-	cancelErr   error
-	cancelCalls []notifyoutbox.OutboxID
 
 	markExpiredErr   error
 	markExpiredCalls []notifyoutbox.OutboxID
@@ -215,44 +185,6 @@ func (f *fakeOutbox) ReleaseClaim(_ context.Context, _ time.Time, id notifyoutbo
 	return e, nil
 }
 
-func (f *fakeOutbox) MarkSent(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string) (notifyoutbox.Entry, error) {
-	f.markSentCalls = append(f.markSentCalls, markSentCall{id, token})
-	if f.markSentErr != nil {
-		return notifyoutbox.Entry{}, f.markSentErr
-	}
-	e := f.claimEntry
-	e.ClaimToken = nil
-	e.State = notifyoutbox.StateSent
-	return e, nil
-}
-
-func (f *fakeOutbox) RecordFailedAttempt(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, next time.Time, token string) (notifyoutbox.Entry, error) {
-	f.recordFailedCalls = append(f.recordFailedCalls, recordFailedCall{id, next, token})
-	if f.recordFailedErr != nil {
-		return notifyoutbox.Entry{}, f.recordFailedErr
-	}
-	if f.recordFailedResult.ID != 0 {
-		return f.recordFailedResult, nil
-	}
-	e := f.claimEntry
-	e.ClaimToken = nil
-	e.AttemptCount++
-	e.State = notifyoutbox.StatePending
-	e.NextAttemptAt = &next
-	return e, nil
-}
-
-func (f *fakeOutbox) Cancel(_ context.Context, _ time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
-	f.cancelCalls = append(f.cancelCalls, id)
-	if f.cancelErr != nil {
-		return notifyoutbox.Entry{}, f.cancelErr
-	}
-	e := f.claimEntry
-	e.ClaimToken = nil
-	e.State = notifyoutbox.StateCanceled
-	return e, nil
-}
-
 func (f *fakeOutbox) MarkExpired(_ context.Context, _ time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
 	f.markExpiredCalls = append(f.markExpiredCalls, id)
 	if f.markExpiredErr != nil {
@@ -264,36 +196,133 @@ func (f *fakeOutbox) MarkExpired(_ context.Context, _ time.Time, id notifyoutbox
 	return e, nil
 }
 
+// --- fakeOutcomes (OutcomeRecorder, Step 8D-B Part 14B) ---
+
+type sentCall struct {
+	id    notifyoutbox.OutboxID
+	token string
+	d     notifydelivery.Delivery
+}
+type canceledCall = sentCall
+type deadLetterCall = sentCall
+
+type failedAttemptCall struct {
+	id    notifyoutbox.OutboxID
+	next  time.Time
+	token string
+	d     notifydelivery.Delivery
+}
+
+type unauthorizedCall struct {
+	id       notifyoutbox.OutboxID
+	token    string
+	d        notifydelivery.Delivery
+	userID   identity.UserID
+	deviceID notifydevices.DeviceID
+}
+
+type fakeOutcomes struct {
+	sentErr   error
+	sentCalls []sentCall
+
+	canceledErr   error
+	canceledCalls []canceledCall
+
+	// failedAttemptResultState, when non-empty, is used as the simulated
+	// real outbox state RecordFailedAttempt would have returned (so a test
+	// can exercise the pending/dead_letter/expired outcome-mapping paths);
+	// defaults to StatePending.
+	failedAttemptResultState notifyoutbox.State
+	failedAttemptErr         error
+	failedAttemptCalls       []failedAttemptCall
+
+	deadLetterErr   error
+	deadLetterCalls []deadLetterCall
+
+	unauthorizedErr   error
+	unauthorizedCalls []unauthorizedCall
+}
+
+func (f *fakeOutcomes) RecordSent(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error) {
+	f.sentCalls = append(f.sentCalls, sentCall{id, token, d})
+	if f.sentErr != nil {
+		return notifyoutbox.Entry{}, notifydelivery.Delivery{}, f.sentErr
+	}
+	return notifyoutbox.Entry{ID: id, State: notifyoutbox.StateSent}, d, nil
+}
+
+func (f *fakeOutcomes) RecordCanceled(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error) {
+	f.canceledCalls = append(f.canceledCalls, canceledCall{id, token, d})
+	if f.canceledErr != nil {
+		return notifyoutbox.Entry{}, notifydelivery.Delivery{}, f.canceledErr
+	}
+	return notifyoutbox.Entry{ID: id, State: notifyoutbox.StateCanceled}, d, nil
+}
+
+func (f *fakeOutcomes) RecordFailedAttempt(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, next time.Time, token string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error) {
+	if f.failedAttemptErr != nil {
+		f.failedAttemptCalls = append(f.failedAttemptCalls, failedAttemptCall{id, next, token, d})
+		return notifyoutbox.Entry{}, notifydelivery.Delivery{}, f.failedAttemptErr
+	}
+	state := f.failedAttemptResultState
+	if state == "" {
+		state = notifyoutbox.StatePending
+	}
+	// d.Outcome is resolved here, mirroring the real notifyoutcome.Store's
+	// own behavior (it derives and overwrites Outcome from the transition's
+	// actual result), and the call is recorded with that resolved value so
+	// a test can assert on what was actually "persisted."
+	d.Outcome = deliveryOutcomeForStateTest(state)
+	f.failedAttemptCalls = append(f.failedAttemptCalls, failedAttemptCall{id, next, token, d})
+	return notifyoutbox.Entry{ID: id, State: state}, d, nil
+}
+
+func (f *fakeOutcomes) RecordDeadLetter(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string, d notifydelivery.Delivery) (notifyoutbox.Entry, notifydelivery.Delivery, error) {
+	f.deadLetterCalls = append(f.deadLetterCalls, deadLetterCall{id, token, d})
+	if f.deadLetterErr != nil {
+		return notifyoutbox.Entry{}, notifydelivery.Delivery{}, f.deadLetterErr
+	}
+	return notifyoutbox.Entry{ID: id, State: notifyoutbox.StateDeadLetter}, d, nil
+}
+
+func (f *fakeOutcomes) RecordUnauthorized(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string, d notifydelivery.Delivery, userID identity.UserID, deviceID notifydevices.DeviceID) (notifyoutbox.Entry, notifydelivery.Delivery, error) {
+	f.unauthorizedCalls = append(f.unauthorizedCalls, unauthorizedCall{id, token, d, userID, deviceID})
+	if f.unauthorizedErr != nil {
+		return notifyoutbox.Entry{}, notifydelivery.Delivery{}, f.unauthorizedErr
+	}
+	return notifyoutbox.Entry{ID: id, State: notifyoutbox.StateDeadLetter}, d, nil
+}
+
 // --- shared test wiring ---
 
 type harness struct {
-	outbox     *fakeOutbox
-	evaluator  *fakeEvaluator
-	devices    *fakeDeviceStore
-	sender     *notifyrelay.FakeSender
-	deliveries *fakeDeliveryStore
+	outbox    *fakeOutbox
+	evaluator *fakeEvaluator
+	devices   *fakeDeviceStore
+	sender    *notifyrelay.FakeSender
+	outcomes  *fakeOutcomes
 }
 
 func newHarness() *harness {
 	return &harness{
-		outbox:     &fakeOutbox{claimEntry: claimedEntry(), claimOK: true},
-		evaluator:  &fakeEvaluator{decision: eligibleDecision()},
-		devices:    &fakeDeviceStore{reg: testModeDevice(), ok: true},
-		sender:     notifyrelay.NewFakeSender(),
-		deliveries: &fakeDeliveryStore{},
+		outbox:    &fakeOutbox{claimEntry: claimedEntry(), claimOK: true},
+		evaluator: &fakeEvaluator{decision: eligibleDecision()},
+		devices:   &fakeDeviceStore{reg: testModeDevice(), ok: true},
+		sender:    notifyrelay.NewFakeSender(),
+		outcomes:  &fakeOutcomes{},
 	}
 }
 
 func (h *harness) worker(t *testing.T) *Worker {
 	t.Helper()
 	w, err := New(Deps{
-		Outbox:     h.outbox,
-		Evaluator:  h.evaluator,
-		Devices:    h.devices,
-		Sender:     h.sender,
-		Deliveries: h.deliveries,
-		Alerts:     fixedAlerts(validAlertData(), nil),
-		Now:        func() time.Time { return fixedNow },
+		Outbox:    h.outbox,
+		Evaluator: h.evaluator,
+		Devices:   h.devices,
+		Sender:    h.sender,
+		Outcomes:  h.outcomes,
+		Alerts:    fixedAlerts(validAlertData(), nil),
+		Now:       func() time.Time { return fixedNow },
 	}, Config{Env: notifywebpush.EnvDev, SendTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -307,7 +336,7 @@ func TestNewRefusesMissingDependencies(t *testing.T) {
 	h := newHarness()
 	base := Deps{
 		Outbox: h.outbox, Evaluator: h.evaluator, Devices: h.devices,
-		Sender: h.sender, Deliveries: h.deliveries, Alerts: fixedAlerts(validAlertData(), nil),
+		Sender: h.sender, Outcomes: h.outcomes, Alerts: fixedAlerts(validAlertData(), nil),
 	}
 	cfg := Config{Env: notifywebpush.EnvDev, SendTimeout: 10 * time.Second}
 
@@ -319,7 +348,7 @@ func TestNewRefusesMissingDependencies(t *testing.T) {
 		{"nil evaluator", func(d *Deps) { d.Evaluator = nil }},
 		{"nil devices", func(d *Deps) { d.Devices = nil }},
 		{"nil sender", func(d *Deps) { d.Sender = nil }},
-		{"nil deliveries", func(d *Deps) { d.Deliveries = nil }},
+		{"nil outcomes", func(d *Deps) { d.Outcomes = nil }},
 		{"nil alerts", func(d *Deps) { d.Alerts = nil }},
 	}
 	for _, c := range cases {
@@ -337,7 +366,7 @@ func TestNewRefusesNonDevEnvironment(t *testing.T) {
 	h := newHarness()
 	deps := Deps{
 		Outbox: h.outbox, Evaluator: h.evaluator, Devices: h.devices,
-		Sender: h.sender, Deliveries: h.deliveries, Alerts: fixedAlerts(validAlertData(), nil),
+		Sender: h.sender, Outcomes: h.outcomes, Alerts: fixedAlerts(validAlertData(), nil),
 	}
 	for _, env := range []notifywebpush.Env{notifywebpush.EnvPreview, notifywebpush.EnvProduction, ""} {
 		w, err := New(deps, Config{Env: env, SendTimeout: 10 * time.Second})
@@ -358,7 +387,7 @@ func TestNewRefusesNonPositiveSendTimeout(t *testing.T) {
 	h := newHarness()
 	deps := Deps{
 		Outbox: h.outbox, Evaluator: h.evaluator, Devices: h.devices,
-		Sender: h.sender, Deliveries: h.deliveries, Alerts: fixedAlerts(validAlertData(), nil),
+		Sender: h.sender, Outcomes: h.outcomes, Alerts: fixedAlerts(validAlertData(), nil),
 	}
 	for _, st := range []time.Duration{0, -time.Second} {
 		if w, err := New(deps, Config{Env: notifywebpush.EnvDev, SendTimeout: st}); err != ErrInput || w != nil {
@@ -371,7 +400,7 @@ func TestNewAppliesDefaultsAndDerivesLeaseDuration(t *testing.T) {
 	h := newHarness()
 	w, err := New(Deps{
 		Outbox: h.outbox, Evaluator: h.evaluator, Devices: h.devices,
-		Sender: h.sender, Deliveries: h.deliveries, Alerts: fixedAlerts(validAlertData(), nil),
+		Sender: h.sender, Outcomes: h.outcomes, Alerts: fixedAlerts(validAlertData(), nil),
 	}, Config{Env: notifywebpush.EnvDev, SendTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -425,11 +454,8 @@ func TestRunOnceNonTestModeDeviceReschedules(t *testing.T) {
 	if len(h.sender.Calls()) != 0 {
 		t.Fatal("expected a non-test_mode device to never be sent to")
 	}
-	if len(h.outbox.cancelCalls) != 0 {
+	if len(h.outcomes.canceledCalls) != 0 {
 		t.Fatal("expected a non-test_mode device's entry to never be canceled")
-	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected no audit row for a deferred entry")
 	}
 	want := fixedNow.Add(DefaultDeferralRecheckInterval)
 	if got := h.outbox.rescheduleCalls[0].next; !got.Equal(want) {
@@ -480,9 +506,6 @@ func TestRunOnceDeferralAtOrPastExpiryExpiresInstead(t *testing.T) {
 	if len(h.outbox.releaseCalls) != 1 || len(h.outbox.markExpiredCalls) != 1 {
 		t.Fatalf("expected release+expire instead, got releases=%d expires=%d", len(h.outbox.releaseCalls), len(h.outbox.markExpiredCalls))
 	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected no audit row for an expiry with no real attempt")
-	}
 }
 
 // --- Quiet hours: queue, never send or cancel ---
@@ -500,11 +523,8 @@ func TestRunOnceQuietHoursReschedules(t *testing.T) {
 	if len(h.sender.Calls()) != 0 {
 		t.Fatal("expected quiet hours to never send")
 	}
-	if len(h.outbox.cancelCalls) != 0 {
+	if len(h.outcomes.canceledCalls) != 0 {
 		t.Fatal("expected quiet hours to never cancel")
-	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected no audit row for a quiet-hours deferral")
 	}
 }
 
@@ -523,67 +543,55 @@ func TestRunOnceAlreadyExpiredAtPlanTimeReleasesAndExpiresWithoutEvaluating(t *t
 	if len(h.outbox.releaseCalls) != 1 || len(h.outbox.markExpiredCalls) != 1 {
 		t.Fatal("expected release+expire")
 	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected no audit row")
-	}
 }
 
-// --- Ineligible (non-quiet-hours): cancel ---
+// --- Ineligible (non-quiet-hours): cancel, atomic, no ReleaseClaim ---
 
-func TestRunOnceIneligibleCancelsAndRecordsAudit(t *testing.T) {
+func TestRunOnceIneligibleCancelsAtomicallyWithNoReleaseClaim(t *testing.T) {
 	h := newHarness()
 	h.evaluator.decision = deviceNotActiveDecision()
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(h.outbox.releaseCalls) != 1 || len(h.outbox.cancelCalls) != 1 {
-		t.Fatalf("expected release-then-cancel, got releases=%d cancels=%d", len(h.outbox.releaseCalls), len(h.outbox.cancelCalls))
+	if len(h.outcomes.canceledCalls) != 1 {
+		t.Fatalf("expected exactly one atomic RecordCanceled call, got %d", len(h.outcomes.canceledCalls))
 	}
-	if len(h.deliveries.records) != 1 {
-		t.Fatalf("expected exactly one audit row, got %d", len(h.deliveries.records))
+	call := h.outcomes.canceledCalls[0]
+	if call.token != claimToken() {
+		t.Fatalf("expected the claim token to be passed through, got %q", call.token)
 	}
-	d := h.deliveries.records[0]
-	if d.Outcome != notifydelivery.OutcomeCanceled || d.AttemptNumber != 1 {
-		t.Fatalf("unexpected delivery record: %+v", d)
+	if call.d.Outcome != notifydelivery.OutcomeCanceled || call.d.AttemptNumber != 1 {
+		t.Fatalf("unexpected delivery record: %+v", call.d)
+	}
+	// The whole point of Part 14B's CancelClaimed primitive: cancellation
+	// must never go through ReleaseClaim at all.
+	if len(h.outbox.releaseCalls) != 0 {
+		t.Fatalf("expected ZERO ReleaseClaim calls on the cancel path, got %d", len(h.outbox.releaseCalls))
 	}
 	if len(h.sender.Calls()) != 0 {
 		t.Fatal("expected no send for an ineligible entry")
 	}
 }
 
-func TestRunOnceCancelFencingLostOnReleaseWritesNoAudit(t *testing.T) {
+func TestRunOnceCancelFencingLostWritesNoAudit(t *testing.T) {
 	h := newHarness()
 	h.evaluator.decision = deviceNotActiveDecision()
-	h.outbox.releaseErr = notifyoutboxstore.ErrConflict
+	h.outcomes.canceledErr = notifyoutboxstore.ErrConflict
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
 	}
-	if len(h.outbox.cancelCalls) != 0 {
-		t.Fatal("expected Cancel to never be called when the release itself lost fencing")
-	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected zero audit writes from a stale worker")
-	}
-}
-
-func TestRunOnceCancelFencingLostOnCancelWritesNoAudit(t *testing.T) {
-	h := newHarness()
-	h.evaluator.decision = deviceNotActiveDecision()
-	h.outbox.cancelErr = notifyoutboxstore.ErrConflict
-	w := h.worker(t)
-	if _, err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
-	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected zero audit writes when Cancel itself loses the race")
+	// The single atomic call already failed internally (simulating a lost
+	// race inside the transaction); nothing else should happen.
+	if len(h.outbox.releaseCalls) != 0 {
+		t.Fatal("expected ZERO ReleaseClaim calls on the cancel path even on a fencing conflict")
 	}
 }
 
 // --- Send: accepted ---
 
-func TestRunOnceSendAcceptedMarksSentAndRecords(t *testing.T) {
+func TestRunOnceSendAcceptedRecordsAtomically(t *testing.T) {
 	h := newHarness()
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
@@ -595,31 +603,28 @@ func TestRunOnceSendAcceptedMarksSentAndRecords(t *testing.T) {
 	if h.sender.Calls()[0].TestMode != true {
 		t.Fatal("expected the request's TestMode to be sourced from the stored device registration")
 	}
-	if len(h.outbox.markSentCalls) != 1 || h.outbox.markSentCalls[0].token != claimToken() {
-		t.Fatalf("expected MarkSent called with the claim token, got %+v", h.outbox.markSentCalls)
+	if len(h.outcomes.sentCalls) != 1 {
+		t.Fatalf("expected exactly one atomic RecordSent call, got %d", len(h.outcomes.sentCalls))
 	}
-	if len(h.deliveries.records) != 1 {
-		t.Fatalf("expected exactly one audit row, got %d", len(h.deliveries.records))
+	call := h.outcomes.sentCalls[0]
+	if call.token != claimToken() {
+		t.Fatalf("expected MarkSent's fencing token to be passed through, got %q", call.token)
 	}
-	d := h.deliveries.records[0]
-	if d.Outcome != notifydelivery.OutcomeSent || d.AttemptNumber != 1 {
-		t.Fatalf("unexpected delivery record: %+v", d)
+	if call.d.Outcome != notifydelivery.OutcomeSent || call.d.AttemptNumber != 1 {
+		t.Fatalf("unexpected delivery record: %+v", call.d)
 	}
 }
 
 func TestRunOnceSendAcceptedFencingLostSkipsAudit(t *testing.T) {
 	h := newHarness()
-	h.outbox.markSentErr = notifyoutboxstore.ErrConflict
+	h.outcomes.sentErr = notifyoutboxstore.ErrConflict
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
 	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected zero audit writes from a stale worker, even though the push was physically sent")
-	}
 }
 
-// --- Send: temporary / permanent failure ---
+// --- Send: temporary failure (existing retry/backoff path, unchanged) ---
 
 func TestRunOnceTemporaryFailureUsesBaseBackoffOnFirstAttempt(t *testing.T) {
 	h := newHarness()
@@ -628,31 +633,19 @@ func TestRunOnceTemporaryFailureUsesBaseBackoffOnFirstAttempt(t *testing.T) {
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(h.outbox.recordFailedCalls) != 1 {
-		t.Fatalf("expected exactly one RecordFailedAttempt call, got %d", len(h.outbox.recordFailedCalls))
+	if len(h.outcomes.failedAttemptCalls) != 1 {
+		t.Fatalf("expected exactly one atomic RecordFailedAttempt call, got %d", len(h.outcomes.failedAttemptCalls))
 	}
 	want := fixedNow.Add(DefaultBaseRetryDelay)
-	if got := h.outbox.recordFailedCalls[0].next; !got.Equal(want) {
+	if got := h.outcomes.failedAttemptCalls[0].next; !got.Equal(want) {
 		t.Fatalf("expected next_attempt_at %v (base delay), got %v", want, got)
 	}
-	if len(h.deliveries.records) != 1 || h.deliveries.records[0].Outcome != notifydelivery.OutcomeFailed {
-		t.Fatalf("expected one OutcomeFailed audit row, got %+v", h.deliveries.records)
+	if h.outcomes.failedAttemptCalls[0].d.AttemptNumber != 1 {
+		t.Fatalf("unexpected attempt number: %+v", h.outcomes.failedAttemptCalls[0].d)
 	}
-}
-
-func TestRunOncePermanentFailureUsesIdenticalMechanics(t *testing.T) {
-	h := newHarness()
-	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomePermanentFailure})
-	w := h.worker(t)
-	if _, err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(h.outbox.recordFailedCalls) != 1 {
-		t.Fatalf("expected RecordFailedAttempt to be used for a permanent failure too, got %d calls", len(h.outbox.recordFailedCalls))
-	}
-	want := fixedNow.Add(DefaultBaseRetryDelay)
-	if got := h.outbox.recordFailedCalls[0].next; !got.Equal(want) {
-		t.Fatalf("expected the identical backoff schedule, got %v want %v", got, want)
+	// Permanent-failure path must never be used for a temporary failure.
+	if len(h.outcomes.deadLetterCalls) != 0 {
+		t.Fatal("expected RecordDeadLetter to never be called for a temporary failure")
 	}
 }
 
@@ -665,7 +658,7 @@ func TestRunOnceTemporaryFailureHonorsRetryAfterFloor(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := fixedNow.Add(5 * time.Minute)
-	if got := h.outbox.recordFailedCalls[0].next; !got.Equal(want) {
+	if got := h.outcomes.failedAttemptCalls[0].next; !got.Equal(want) {
 		t.Fatalf("expected RetryAfter honored as a floor (%v), got %v", want, got)
 	}
 }
@@ -679,12 +672,12 @@ func TestRunOnceTemporaryFailureShorterRetryAfterIgnored(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := fixedNow.Add(DefaultBaseRetryDelay)
-	if got := h.outbox.recordFailedCalls[0].next; !got.Equal(want) {
+	if got := h.outcomes.failedAttemptCalls[0].next; !got.Equal(want) {
 		t.Fatalf("expected the shorter RetryAfter to be ignored, want %v got %v", want, got)
 	}
 }
 
-func TestRunOnceFailureNeverSchedulesBeyondExpiresAt(t *testing.T) {
+func TestRunOnceTemporaryFailureNeverSchedulesBeyondExpiresAt(t *testing.T) {
 	h := newHarness()
 	soon := fixedNow.Add(10 * time.Second) // well inside the 30s base delay
 	h.outbox.claimEntry.ExpiresAt = soon
@@ -693,25 +686,22 @@ func TestRunOnceFailureNeverSchedulesBeyondExpiresAt(t *testing.T) {
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := h.outbox.recordFailedCalls[0].next; !got.Equal(soon) {
+	if got := h.outcomes.failedAttemptCalls[0].next; !got.Equal(soon) {
 		t.Fatalf("expected next_attempt_at capped at expires_at (%v), got %v", soon, got)
 	}
 }
 
-func TestRunOnceFailureFencingLostSkipsAudit(t *testing.T) {
+func TestRunOnceTemporaryFailureFencingLostSwallowed(t *testing.T) {
 	h := newHarness()
 	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomeTemporaryFailure})
-	h.outbox.recordFailedErr = notifyoutboxstore.ErrConflict
+	h.outcomes.failedAttemptErr = notifyoutboxstore.ErrConflict
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
 	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected zero audit writes from a stale worker")
-	}
 }
 
-func TestRunOnceOutcomeMappingFollowsActualReturnedState(t *testing.T) {
+func TestRunOnceTemporaryFailureOutcomeMappingFollowsActualReturnedState(t *testing.T) {
 	cases := []struct {
 		name    string
 		state   notifyoutbox.State
@@ -725,105 +715,113 @@ func TestRunOnceOutcomeMappingFollowsActualReturnedState(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness()
 			h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomeTemporaryFailure})
-			result := h.outbox.claimEntry
-			result.State = c.state
-			result.ClaimToken = nil
-			h.outbox.recordFailedResult = result
+			h.outcomes.failedAttemptResultState = c.state
 			w := h.worker(t)
 			if _, err := w.RunOnce(context.Background()); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(h.deliveries.records) != 1 || h.deliveries.records[0].Outcome != c.outcome {
-				t.Fatalf("expected outcome %q, got %+v", c.outcome, h.deliveries.records)
+			if len(h.outcomes.failedAttemptCalls) != 1 || h.outcomes.failedAttemptCalls[0].d.Outcome != c.outcome {
+				t.Fatalf("expected outcome %q, got %+v", c.outcome, h.outcomes.failedAttemptCalls)
 			}
 		})
 	}
 }
 
-// --- Send: unauthorized ---
+// --- Send: permanent failure (NEW separate path, immediate dead-letter) ---
 
-func TestRunOnceUnauthorizedRevokesAndRecords(t *testing.T) {
+func TestRunOncePermanentFailureImmediatelyDeadLetters(t *testing.T) {
+	h := newHarness()
+	code := "malformed_request"
+	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomePermanentFailure, Code: &code})
+	w := h.worker(t)
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(h.outcomes.deadLetterCalls) != 1 {
+		t.Fatalf("expected exactly one atomic RecordDeadLetter call, got %d", len(h.outcomes.deadLetterCalls))
+	}
+	call := h.outcomes.deadLetterCalls[0]
+	if call.d.Outcome != notifydelivery.OutcomeDeadLetter || call.d.AttemptNumber != 1 {
+		t.Fatalf("unexpected delivery record: %+v", call.d)
+	}
+	if call.d.ErrorCode == nil || *call.d.ErrorCode != code {
+		t.Fatalf("expected the provider's error code to be carried through, got %+v", call.d.ErrorCode)
+	}
+	// Permanent failure must NEVER go through the temporary-failure
+	// (retry/backoff) path -- this is the exact distinction Part 14B
+	// introduces.
+	if len(h.outcomes.failedAttemptCalls) != 0 {
+		t.Fatal("expected RecordFailedAttempt to never be called for a permanent failure")
+	}
+}
+
+func TestRunOncePermanentFailureFencingLostSwallowed(t *testing.T) {
+	h := newHarness()
+	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomePermanentFailure})
+	h.outcomes.deadLetterErr = notifyoutboxstore.ErrConflict
+	w := h.worker(t)
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
+	}
+}
+
+// --- Send: unauthorized (atomic, single-cycle, no next-cycle cleanup) ---
+
+func TestRunOnceUnauthorizedAtomicallyTerminalizesAndRevokesInOneCycle(t *testing.T) {
 	h := newHarness()
 	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomeUnauthorized})
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(h.outbox.releaseCalls) != 1 {
-		t.Fatalf("expected exactly one ReleaseClaim call, got %d", len(h.outbox.releaseCalls))
+	if len(h.outcomes.unauthorizedCalls) != 1 {
+		t.Fatalf("expected exactly one atomic RecordUnauthorized call, got %d", len(h.outcomes.unauthorizedCalls))
 	}
-	if len(h.devices.revokeCalls) != 1 {
-		t.Fatalf("expected exactly one device revocation, got %d", len(h.devices.revokeCalls))
+	call := h.outcomes.unauthorizedCalls[0]
+	if call.userID != 3 || call.deviceID != 7 {
+		t.Fatalf("unexpected revoke target: %+v", call)
 	}
-	if h.devices.revokeCalls[0].userID != 3 || h.devices.revokeCalls[0].id != 7 {
-		t.Fatalf("unexpected revoke target: %+v", h.devices.revokeCalls[0])
+	if call.d.Outcome != notifydelivery.OutcomeUnauthorized || call.d.AttemptNumber != 1 {
+		t.Fatalf("unexpected delivery record: %+v", call.d)
 	}
-	if len(h.deliveries.records) != 1 {
-		t.Fatalf("expected exactly one audit row, got %d", len(h.deliveries.records))
-	}
-	d := h.deliveries.records[0]
-	if d.Outcome != notifydelivery.OutcomeUnauthorized || d.AttemptNumber != 1 {
-		t.Fatalf("unexpected delivery record: %+v", d)
+	// No ReleaseClaim step at all -- the whole point of using
+	// DeadLetterClaimed directly.
+	if len(h.outbox.releaseCalls) != 0 {
+		t.Fatalf("expected ZERO ReleaseClaim calls on the unauthorized path, got %d", len(h.outbox.releaseCalls))
 	}
 }
 
-func TestRunOnceUnauthorizedFencingLostSkipsRevokeAndAudit(t *testing.T) {
+func TestRunOnceUnauthorizedFencingLostWritesNothing(t *testing.T) {
 	h := newHarness()
 	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomeUnauthorized})
-	h.outbox.releaseErr = notifyoutboxstore.ErrConflict
+	h.outcomes.unauthorizedErr = notifyoutboxstore.ErrConflict
 	w := h.worker(t)
 	if _, err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("expected a fencing conflict to be swallowed, got %v", err)
 	}
-	if len(h.devices.revokeCalls) != 0 {
-		t.Fatal("expected zero device mutation from a stale worker")
-	}
-	if len(h.deliveries.records) != 0 {
-		t.Fatal("expected zero audit writes from a stale worker")
-	}
 }
 
-// TestRunOnceUnauthorizedThenNextCycleNeverResends is the "subscription can
-// never be sent to again" proof the Part 14A design lock requires. The
-// second cycle's fakeEvaluator decision is set to ReasonDeviceNotActive
-// directly, modeling what the real notifypreferences.Evaluator (already
-// separately tested for exactly this case) would report once it consults the
-// device this same worker revoked in cycle one -- this test's own job is to
-// prove notifyworker's handling of that reported decision, not to
-// re-verify notifypreferences' own correctness.
-func TestRunOnceUnauthorizedThenNextCycleNeverResends(t *testing.T) {
+// TestRunOnceUnauthorizedIsAlreadyTerminalNoSecondCycleNeeded proves the
+// Part 14B guarantee directly: after one RunOnce call resolves an
+// unauthorized send, the claimed-entry fixture this fake outbox always
+// returns is no longer meaningfully reclaimable in practice (in the real
+// store it is now dead_letter, not pending) -- the single atomic call
+// already did everything RecordUnauthorized's own contract promises (no
+// next-cycle cleanup). This is asserted here by confirming notifyworker
+// itself made exactly the one call and nothing else, never a second
+// ReleaseClaim/Cancel-shaped follow-up within the same cycle.
+func TestRunOnceUnauthorizedIsAlreadyTerminalNoSecondCycleNeeded(t *testing.T) {
 	h := newHarness()
 	h.sender.SetResult(notifyrelay.OutboxID(1), notifyrelay.Result{Outcome: notifyrelay.OutcomeUnauthorized})
 	w := h.worker(t)
-
 	if _, err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("cycle 1: unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(h.sender.Calls()) != 1 {
-		t.Fatalf("cycle 1: expected exactly one send, got %d", len(h.sender.Calls()))
+	if len(h.outcomes.unauthorizedCalls) != 1 {
+		t.Fatalf("expected exactly one call total, got %d", len(h.outcomes.unauthorizedCalls))
 	}
-	if len(h.devices.revokeCalls) != 1 {
-		t.Fatal("cycle 1: expected the device to be revoked")
-	}
-
-	// Cycle 2: same entry reclaimed (immediately due after ReleaseClaim);
-	// the evaluator now reports the device inactive.
-	h.evaluator.decision = deviceNotActiveDecision()
-	if _, err := w.RunOnce(context.Background()); err != nil {
-		t.Fatalf("cycle 2: unexpected error: %v", err)
-	}
-	if len(h.sender.Calls()) != 1 {
-		t.Fatalf("cycle 2: expected NO additional send to the revoked subscription, total calls = %d", len(h.sender.Calls()))
-	}
-	if len(h.outbox.cancelCalls) != 1 {
-		t.Fatal("cycle 2: expected the entry to be canceled via the standard ActionCancel path")
-	}
-	outcomes := make([]notifydelivery.Outcome, len(h.deliveries.records))
-	for i, d := range h.deliveries.records {
-		outcomes[i] = d.Outcome
-	}
-	if len(outcomes) != 2 || outcomes[0] != notifydelivery.OutcomeUnauthorized || outcomes[1] != notifydelivery.OutcomeCanceled {
-		t.Fatalf("expected [unauthorized, canceled] audit outcomes, got %v", outcomes)
+	if len(h.outcomes.canceledCalls) != 0 || len(h.outbox.releaseCalls) != 0 || len(h.outbox.rescheduleCalls) != 0 {
+		t.Fatal("expected no follow-up cancel/release/reschedule calls within the same cycle")
 	}
 }
 
@@ -841,9 +839,8 @@ func TestBackoffDelaySchedule(t *testing.T) {
 		{3, 120 * time.Second},
 		{4, 240 * time.Second},
 		{5, 480 * time.Second},
-		{6, 960 * time.Second}, // 16m > 15m cap would apply at attempt 6 if uncapped (960s=16m)... see cap test below
 	}
-	for _, c := range cases[:5] { // attempts 1-5 stay under the 15m cap
+	for _, c := range cases {
 		if got := BackoffDelay(c.attempt, base, max, nil); got != c.want {
 			t.Fatalf("attempt %d: expected %v, got %v", c.attempt, c.want, got)
 		}

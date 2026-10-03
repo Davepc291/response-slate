@@ -6,15 +6,16 @@ package notifyworker
 // transaction that is always rolled back; no fixture is left behind.
 //
 // This wires a real notifyoutboxstore.Postgres, notifydevicestore.Postgres,
-// and notifydeliverystore.Postgres (all sharing one rollback-only
-// transaction, exactly like notifydevicestore's own Replace/Revoke
-// integration tests already do via the Pool interface's nested-transaction
-// support) behind a Worker, with a fake Evaluator and notifyrelay.FakeSender
-// -- the Evaluator and Sender are deliberately fake because notifypreferences'
-// own correctness is already proven by its own test suite; this test's job
-// is to prove notifyworker's OWN integration with the real outbox/device/
-// delivery stores, which no unit-test fake can prove (real claim fencing,
-// real lease-expiry reclaim, real composite foreign keys).
+// and (as of Step 8D-B Part 14B) a real notifyoutcome.Store -- the atomic
+// outcome coordinator, itself composed of notifyoutboxstore.Postgres,
+// notifydeliverystore.Postgres, and notifydevicestore.Postgres sharing the
+// SAME transaction -- behind a Worker, with a fake Evaluator and
+// notifyrelay.FakeSender. The Evaluator and Sender are deliberately fake
+// because notifypreferences' own correctness is already proven by its own
+// test suite; this test's job is to prove notifyworker's OWN integration
+// with the real outbox/device/outcome stores, which no unit-test fake can
+// prove (real claim fencing, real lease-expiry reclaim, real atomic
+// commit/rollback, real composite foreign keys).
 import (
 	"context"
 	"crypto/sha256"
@@ -27,11 +28,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"greenwich-fire-responder/backend/internal/identity"
-	"greenwich-fire-responder/backend/internal/notifydeliverystore"
 	"greenwich-fire-responder/backend/internal/notifydevices"
 	"greenwich-fire-responder/backend/internal/notifydevicestore"
 	"greenwich-fire-responder/backend/internal/notifyoutbox"
 	"greenwich-fire-responder/backend/internal/notifyoutboxstore"
+	"greenwich-fire-responder/backend/internal/notifyoutcome"
 	"greenwich-fire-responder/backend/internal/notifyrelay"
 	"greenwich-fire-responder/backend/internal/notifywebpush"
 )
@@ -131,7 +132,7 @@ func TestLiveNotifyWorkerEndToEndAndCrashRecoveryRollsBack(t *testing.T) {
 
 	outboxStore := &notifyoutboxstore.Postgres{DB: tx}
 	deviceStore := &notifydevicestore.Postgres{DB: tx}
-	deliveryStore := &notifydeliverystore.Postgres{DB: tx}
+	outcomes := &notifyoutcome.Store{DB: tx}
 
 	entry, err := outboxStore.Enqueue(ctx, base, eventID, notifydevices.DeviceID(deviceID), identity.UserID(userID), 5, base.Add(time.Minute), base.Add(time.Hour))
 	if err != nil {
@@ -143,13 +144,13 @@ func TestLiveNotifyWorkerEndToEndAndCrashRecoveryRollsBack(t *testing.T) {
 	currentNow := base.Add(90 * time.Second)
 
 	w, err := New(Deps{
-		Outbox:     outboxStore,
-		Evaluator:  evaluator,
-		Devices:    deviceStore,
-		Sender:     sender,
-		Deliveries: deliveryStore,
-		Alerts:     fixedAlerts(validAlertData(), nil),
-		Now:        func() time.Time { return currentNow },
+		Outbox:    outboxStore,
+		Evaluator: evaluator,
+		Devices:   deviceStore,
+		Sender:    sender,
+		Outcomes:  outcomes,
+		Alerts:    fixedAlerts(validAlertData(), nil),
+		Now:       func() time.Time { return currentNow },
 	}, Config{Env: notifywebpush.EnvDev, SendTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -211,6 +212,41 @@ func TestLiveNotifyWorkerEndToEndAndCrashRecoveryRollsBack(t *testing.T) {
 	}
 	if len(sender.Calls()) != 2 {
 		t.Fatalf("expected exactly one additional real send for the reclaimed entry, total=%d", len(sender.Calls()))
+	}
+
+	// 3. Unauthorized, single-cycle, atomic proof (Step 8D-B Part 14B): a
+	// third entry's device is reported unauthorized by the provider. One
+	// RunOnce call must atomically dead-letter the outbox row, write exactly
+	// one OutcomeUnauthorized delivery row, AND revoke the device -- all
+	// durably together, with no second cycle needed at all.
+	deviceID3 := insertFixtureTestModeDevice(t, ctx, tx, userID, "https://push.example.invalid/worker/live-three")
+	entry3, err := outboxStore.Enqueue(ctx, base, eventID, notifydevices.DeviceID(deviceID3), identity.UserID(userID), 5, base.Add(time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Enqueue (entry3) failed: %v", err)
+	}
+	sender.SetResult(notifyrelay.OutboxID(entry3.ID), notifyrelay.Result{Outcome: notifyrelay.OutcomeUnauthorized})
+
+	processed3, err := w.RunOnce(ctx)
+	if err != nil || !processed3 {
+		t.Fatalf("expected the unauthorized cycle to process entry3, got processed=%v err=%v", processed3, err)
+	}
+	deadLettered3, ok, err := outboxStore.Get(ctx, entry3.ID)
+	if err != nil || !ok || deadLettered3.State != notifyoutbox.StateDeadLetter {
+		t.Fatalf("expected entry3 to be immediately dead_letter after one cycle, got ok=%v err=%v entry=%+v", ok, err, deadLettered3)
+	}
+	var unauthorizedCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM notification_deliveries WHERE outbox_id = $1 AND outcome = 'unauthorized'`, int64(entry3.ID)).Scan(&unauthorizedCount); err != nil {
+		t.Fatal(err)
+	}
+	if unauthorizedCount != 1 {
+		t.Fatalf("expected exactly one real 'unauthorized' delivery-audit row, got %d", unauthorizedCount)
+	}
+	var revokedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT revoked_at FROM notification_devices WHERE id = $1`, deviceID3).Scan(&revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt == nil {
+		t.Fatal("expected the device to be revoked by the SAME single cycle, with no next-cycle cleanup required")
 	}
 
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
