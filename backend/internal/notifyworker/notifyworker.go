@@ -67,10 +67,16 @@ import (
 // transaction. This package no longer calls notifyoutboxstore.MarkSent/
 // RecordFailedAttempt/Cancel or notifydevicestore.Revoke directly -- it
 // calls the OutcomeRecorder interface below instead, which notifyoutcome.Store
-// satisfies. The non-transactional, single-statement operations
-// (ClaimNextDue, RescheduleClaim, ReleaseClaim, MarkExpired, and a plain
-// device Get) are unchanged and still called directly, since there is
-// nothing to make atomic about a single statement that writes no audit row.
+// satisfies. Step 8D-B Part 14C additionally replaced the
+// ReleaseClaim-then-MarkExpired sequence with one fenced
+// MarkExpiredClaimed call, closing the last release-then-reclaim window in
+// the worker; ReleaseClaim and the unfenced MarkExpired accordingly have no
+// remaining call site in this package and were removed from its own local
+// OutboxStore interface (both remain fully intact in notifyoutboxstore
+// itself). The non-transactional, single-statement operations that remain
+// (ClaimNextDue, RescheduleClaim, MarkExpiredClaimed, and a plain device
+// Get) are called directly, since there is nothing to make atomic about a
+// single statement that writes no audit row.
 
 // Default tuning values, used by New whenever the corresponding Config field
 // is left at its zero value. None of these is a claim about what a future,
@@ -117,14 +123,19 @@ var (
 // its non-transactional, single-statement operations only (Step 8D-B Part
 // 14B: MarkSent/RecordFailedAttempt/Cancel moved to OutcomeRecorder below,
 // since those now always commit atomically with their own audit row).
+// ReleaseClaim and the unfenced MarkExpired were removed from this
+// interface in Step 8D-B Part 14C: handleNotPlannable now calls the new,
+// fenced MarkExpiredClaimed directly, and a direct inspection of this
+// package confirmed neither ReleaseClaim nor MarkExpired has any remaining
+// call site here -- both remain fully intact, unchanged primitives in
+// notifyoutboxstore itself for any other caller.
 // Declared locally (rather than depending on the concrete
 // *notifyoutboxstore.Postgres type) so this package is testable with a
 // simple fake, exactly mirroring notifyattempt.Evaluator's own convention.
 type OutboxStore interface {
 	ClaimNextDue(ctx context.Context, now time.Time, lease time.Duration) (notifyoutbox.Entry, bool, error)
 	RescheduleClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string, nextAttemptAt time.Time) (notifyoutbox.Entry, error)
-	ReleaseClaim(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error)
-	MarkExpired(ctx context.Context, now time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error)
+	MarkExpiredClaimed(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error)
 }
 
 // DeviceStore is the minimal notifydevicestore surface a Worker needs: a
@@ -391,26 +402,23 @@ func (w *Worker) rescheduleDeferred(ctx context.Context, now time.Time, entry no
 }
 
 // handleNotPlannable resolves an entry discovered to already be past its own
-// ExpiresAt (or otherwise non-plannable) at evaluation time: release the
-// claim, then best-effort MarkExpired. No delivery-audit row is written for
-// this path -- there was no real send attempt to audit (Part 14A design
-// lock Section 3 / flag 5), carrying forward, for this one specific case,
-// the zero-real-attempt question Part 7's own discovery left open.
+// ExpiresAt (or otherwise non-plannable) at evaluation time via the new
+// (Step 8D-B Part 14C) notifyoutboxstore.MarkExpiredClaimed -- one fenced
+// statement, no ReleaseClaim step, no window for a second worker to reclaim
+// the row in between. No delivery-audit row is written for this path:
+// there was no real send attempt to audit (Part 14A design lock Section 3 /
+// flag 5; Part 7's own zero-real-attempt question remains carried forward
+// unchanged, untouched by this part). No send, no cancellation, and no
+// device mutation occur on this path either.
 //
-// A lost race on either call (another worker already reclaimed, or already
-// resolved, this entry) is treated as benign: MarkExpired's own fencing
-// (claim_token IS NULL AND expires_at <= now) means it either succeeds
-// exactly once or fails closed, never double-expiring or mutating a row it
-// does not own.
+// A fencing conflict (another worker already reclaimed, or already
+// resolved, this entry) is swallowed exactly like every other stale-worker
+// outcome in this package: zero further action. Any other error propagates.
 func (w *Worker) handleNotPlannable(ctx context.Context, now time.Time, entry notifyoutbox.Entry, claimToken string) error {
-	if _, err := w.deps.Outbox.ReleaseClaim(ctx, now, entry.ID, claimToken); err != nil {
+	if _, err := w.deps.Outbox.MarkExpiredClaimed(ctx, now, entry.ID, claimToken); err != nil {
 		if errors.Is(err, notifyoutboxstore.ErrConflict) {
 			return nil
 		}
-		return err
-	}
-	if _, err := w.deps.Outbox.MarkExpired(ctx, now, entry.ID); err != nil &&
-		!errors.Is(err, notifyoutboxstore.ErrConflict) && !errors.Is(err, notifyoutboxstore.ErrNotFound) {
 		return err
 	}
 	return nil

@@ -900,6 +900,94 @@ func TestRescheduleClaimDatabaseErrorFailsClosed(t *testing.T) {
 	}
 }
 
+// --- MarkExpiredClaimed ---
+
+func TestMarkExpiredClaimedUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestMarkExpiredClaimedRejectsInvalidInputBeforeQuerying(t *testing.T) {
+	q := &fakeQuerier{}
+	p := &Postgres{DB: q}
+	if _, err := p.MarkExpiredClaimed(context.Background(), time.Time{}, 1, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero now, got %v", err)
+	}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 0, validClaimToken()); err != ErrInput {
+		t.Fatalf("expected ErrInput for zero id, got %v", err)
+	}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 1, "not-a-valid-token"); err != ErrInput {
+		t.Fatalf("expected ErrInput for a malformed claim token, got %v", err)
+	}
+	if len(q.calls) != 0 {
+		t.Fatal("invalid input must never reach the database")
+	}
+}
+
+func TestMarkExpiredClaimedSuccess(t *testing.T) {
+	now := fixedNow()
+	q := single(fakeRow{id: 1, eventID: validEventID(), state: "expired", attemptCount: 1, maxAttempts: 3, expiresAt: now.Add(-time.Minute), createdAt: now.Add(-time.Hour), updatedAt: now})
+	p := &Postgres{DB: q}
+	token := validClaimToken()
+	entry, err := p.MarkExpiredClaimed(context.Background(), now, 1, token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sql := q.calls[0].sql
+	if !strings.Contains(sql, "SET state = 'expired', next_attempt_at = NULL, claim_token = NULL") ||
+		!strings.Contains(sql, "WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid AND expires_at <= $3") {
+		t.Fatalf("expected a pending-and-claim-fenced, expiry-gated direct transition to expired, got %q", sql)
+	}
+	if q.calls[0].args[1] != token {
+		t.Fatalf("expected the claim token to travel as a bound parameter, got %#v", q.calls[0].args[1])
+	}
+	if q.calls[0].args[2] != now {
+		t.Fatalf("expected now to travel as the expiry-comparison parameter, got %#v", q.calls[0].args[2])
+	}
+	if entry.State != notifyoutbox.StateExpired {
+		t.Fatalf("unexpected state: %+v", entry)
+	}
+	if entry.Claimed() {
+		t.Fatal("expected claim_token to be cleared on the returned entry")
+	}
+	if entry.AttemptCount != 1 {
+		t.Fatalf("expected MarkExpiredClaimed to never touch attempt_count, got %+v", entry)
+	}
+}
+
+func TestMarkExpiredClaimedConflictOnStaleTokenNotYetDueOrTerminalRow(t *testing.T) {
+	// Reached whether the token is stale/superseded, the entry is not yet
+	// actually due to expire, or the row is already terminal -- all three
+	// collapse to the same ErrConflict via classifyMissingOrConflict,
+	// exactly like every other transition method. The live integration test
+	// proves the not-yet-due case specifically against a real database,
+	// since this fake cannot simulate the real "expires_at <= $3" SQL
+	// comparison.
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, boolRow{}}}
+	p := &Postgres{DB: q}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 5, validClaimToken()); err != ErrConflict {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestMarkExpiredClaimedNotFound(t *testing.T) {
+	q := &fakeQuerier{rows: []pgx.Row{fakeRow{err: pgx.ErrNoRows}, fakeRow{err: pgx.ErrNoRows}}}
+	p := &Postgres{DB: q}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 999, validClaimToken()); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMarkExpiredClaimedDatabaseErrorFailsClosed(t *testing.T) {
+	q := single(fakeRow{err: errors.New("connection reset")})
+	p := &Postgres{DB: q}
+	if _, err := p.MarkExpiredClaimed(context.Background(), fixedNow(), 1, validClaimToken()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
 // --- CancelClaimed ---
 
 func TestCancelClaimedUnconfiguredStoreFailsClosed(t *testing.T) {

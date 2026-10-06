@@ -39,13 +39,17 @@
 // immutable/append-only) semantics, not something this mutable-state-machine
 // package should also own.
 //
-// CancelClaimed and DeadLetterClaimed are implemented (Step 8D-B Part 14B):
-// direct, single-statement, claim-fenced transitions straight from
-// claimed/pending to a terminal state, with no ReleaseClaim intermediate
-// step and therefore no window where a second worker could reclaim the row
-// between release and terminalization. These exist specifically so
+// CancelClaimed and DeadLetterClaimed are implemented (Step 8D-B Part 14B),
+// and MarkExpiredClaimed is implemented (Step 8D-B Part 14C): direct,
+// single-statement, claim-fenced transitions straight from claimed/pending
+// to a terminal state, with no ReleaseClaim intermediate step and therefore
+// no window where a second worker could reclaim the row between release and
+// terminalization. CancelClaimed/DeadLetterClaimed exist specifically so
 // backend/internal/notifyoutcome's atomic outcome-recording methods never
-// need more than one notifyoutboxstore call per outcome.
+// need more than one notifyoutboxstore call per outcome; MarkExpiredClaimed
+// serves the same purpose for backend/internal/notifyworker's own
+// zero-real-attempt expiration path directly, with no audit row to make
+// atomic with.
 package notifyoutboxstore
 
 import (
@@ -771,6 +775,50 @@ func (p *Postgres) RescheduleClaim(ctx context.Context, now time.Time, id notify
 	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET claim_token = NULL, next_attempt_at = $2
         WHERE id = $1 AND state = 'pending' AND claim_token = $3::uuid AND $2::timestamptz <= expires_at
         RETURNING `+selectColumns, int64(id), nextAttemptAt, claimToken)
+	entry, err := scanEntry(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notifyoutbox.Entry{}, p.classifyMissingOrConflict(ctx, id)
+		}
+		return notifyoutbox.Entry{}, safeDB(err)
+	}
+	return entry, nil
+}
+
+// MarkExpiredClaimed transitions a currently-claimed pending entry directly
+// to expired, fenced on claim_token, in one statement (Step 8D-B Part 14C) --
+// no ReleaseClaim intermediate step, and therefore no window where a second
+// worker could reclaim the row between release and expiration. This is the
+// claimed-row counterpart to the existing, unfenced MarkExpired, which only
+// ever operates on an already-unclaimed row (for example a future
+// reaper-style sweep that never held a claim at all); both remain distinct,
+// useful primitives for their own distinct callers. MarkExpired itself is
+// unchanged by this addition: its own behavior, signature, and callers are
+// untouched.
+//
+// Like MarkExpired, this never touches attempt_count: no real delivery
+// attempt was made against this entry, so there is nothing to count.
+// next_attempt_at is cleared to NULL: an expired entry has no next attempt.
+//
+// A stale or already-superseded claim_token fails closed with ErrConflict,
+// mutating nothing. An entry that is still pending and claimed with the
+// correct token, but not yet actually due to expire (now < expires_at),
+// also fails closed with ErrConflict -- this transition is never a
+// substitute for simply waiting. An unknown id fails closed with
+// ErrNotFound; an already-terminal id fails closed with ErrConflict too
+// (see ErrConflict's own doc comment for why one sentinel covers every such
+// case).
+func (p *Postgres) MarkExpiredClaimed(ctx context.Context, now time.Time, id notifyoutbox.OutboxID, claimToken string) (notifyoutbox.Entry, error) {
+	if p == nil || p.DB == nil {
+		return notifyoutbox.Entry{}, ErrUnavailable
+	}
+	if now.IsZero() || id <= 0 || !claimTokenPattern.MatchString(claimToken) {
+		return notifyoutbox.Entry{}, ErrInput
+	}
+
+	row := p.DB.QueryRow(ctx, `UPDATE notification_outbox SET state = 'expired', next_attempt_at = NULL, claim_token = NULL
+        WHERE id = $1 AND state = 'pending' AND claim_token = $2::uuid AND expires_at <= $3
+        RETURNING `+selectColumns, int64(id), claimToken, now)
 	entry, err := scanEntry(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

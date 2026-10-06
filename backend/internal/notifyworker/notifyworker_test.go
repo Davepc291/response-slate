@@ -131,14 +131,14 @@ func fixedAlerts(data AlertData, err error) AlertLookup {
 	return func(context.Context, string) (AlertData, error) { return data, err }
 }
 
-// --- fakeOutbox (non-transactional operations only, post-Part 14B) ---
+// --- fakeOutbox (non-transactional operations only, post-Part 14B/14C) ---
 
 type rescheduleCall struct {
 	id    notifyoutbox.OutboxID
 	token string
 	next  time.Time
 }
-type releaseCall struct {
+type markExpiredClaimedCall struct {
 	id    notifyoutbox.OutboxID
 	token string
 }
@@ -152,11 +152,11 @@ type fakeOutbox struct {
 	rescheduleErr   error
 	rescheduleCalls []rescheduleCall
 
-	releaseErr   error
-	releaseCalls []releaseCall
-
-	markExpiredErr   error
-	markExpiredCalls []notifyoutbox.OutboxID
+	// Step 8D-B Part 14C: ReleaseClaim and the unfenced MarkExpired are gone
+	// from this fake, mirroring their removal from the real OutboxStore
+	// interface -- handleNotPlannable now calls MarkExpiredClaimed only.
+	markExpiredClaimedErr   error
+	markExpiredClaimedCalls []markExpiredClaimedCall
 }
 
 func (f *fakeOutbox) ClaimNextDue(context.Context, time.Time, time.Duration) (notifyoutbox.Entry, bool, error) {
@@ -175,20 +175,10 @@ func (f *fakeOutbox) RescheduleClaim(_ context.Context, _ time.Time, id notifyou
 	return e, nil
 }
 
-func (f *fakeOutbox) ReleaseClaim(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string) (notifyoutbox.Entry, error) {
-	f.releaseCalls = append(f.releaseCalls, releaseCall{id, token})
-	if f.releaseErr != nil {
-		return notifyoutbox.Entry{}, f.releaseErr
-	}
-	e := f.claimEntry
-	e.ClaimToken = nil
-	return e, nil
-}
-
-func (f *fakeOutbox) MarkExpired(_ context.Context, _ time.Time, id notifyoutbox.OutboxID) (notifyoutbox.Entry, error) {
-	f.markExpiredCalls = append(f.markExpiredCalls, id)
-	if f.markExpiredErr != nil {
-		return notifyoutbox.Entry{}, f.markExpiredErr
+func (f *fakeOutbox) MarkExpiredClaimed(_ context.Context, _ time.Time, id notifyoutbox.OutboxID, token string) (notifyoutbox.Entry, error) {
+	f.markExpiredClaimedCalls = append(f.markExpiredClaimedCalls, markExpiredClaimedCall{id, token})
+	if f.markExpiredClaimedErr != nil {
+		return notifyoutbox.Entry{}, f.markExpiredClaimedErr
 	}
 	e := f.claimEntry
 	e.ClaimToken = nil
@@ -503,8 +493,8 @@ func TestRunOnceDeferralAtOrPastExpiryExpiresInstead(t *testing.T) {
 	if len(h.outbox.rescheduleCalls) != 0 {
 		t.Fatal("expected RescheduleClaim to never be called when the capped requeue time would not be after now")
 	}
-	if len(h.outbox.releaseCalls) != 1 || len(h.outbox.markExpiredCalls) != 1 {
-		t.Fatalf("expected release+expire instead, got releases=%d expires=%d", len(h.outbox.releaseCalls), len(h.outbox.markExpiredCalls))
+	if len(h.outbox.markExpiredClaimedCalls) != 1 {
+		t.Fatalf("expected exactly one fenced MarkExpiredClaimed call instead, got %d", len(h.outbox.markExpiredClaimedCalls))
 	}
 }
 
@@ -530,7 +520,7 @@ func TestRunOnceQuietHoursReschedules(t *testing.T) {
 
 // --- Already past ExpiresAt at plan time ---
 
-func TestRunOnceAlreadyExpiredAtPlanTimeReleasesAndExpiresWithoutEvaluating(t *testing.T) {
+func TestRunOnceAlreadyExpiredAtPlanTimeMarksExpiredClaimedWithoutEvaluating(t *testing.T) {
 	h := newHarness()
 	h.outbox.claimEntry.ExpiresAt = fixedNow // not strictly after now -> ErrNotPlannable, evaluator never consulted
 	w := h.worker(t)
@@ -540,8 +530,11 @@ func TestRunOnceAlreadyExpiredAtPlanTimeReleasesAndExpiresWithoutEvaluating(t *t
 	if h.evaluator.calls != 0 {
 		t.Fatal("expected the evaluator to never be consulted for an already-expired entry")
 	}
-	if len(h.outbox.releaseCalls) != 1 || len(h.outbox.markExpiredCalls) != 1 {
-		t.Fatal("expected release+expire")
+	if len(h.outbox.markExpiredClaimedCalls) != 1 {
+		t.Fatalf("expected exactly one fenced MarkExpiredClaimed call, got %d", len(h.outbox.markExpiredClaimedCalls))
+	}
+	if h.outbox.markExpiredClaimedCalls[0].token != claimToken() {
+		t.Fatalf("expected the claim token to be passed through, got %q", h.outbox.markExpiredClaimedCalls[0].token)
 	}
 }
 
@@ -565,9 +558,10 @@ func TestRunOnceIneligibleCancelsAtomicallyWithNoReleaseClaim(t *testing.T) {
 		t.Fatalf("unexpected delivery record: %+v", call.d)
 	}
 	// The whole point of Part 14B's CancelClaimed primitive: cancellation
-	// must never go through ReleaseClaim at all.
-	if len(h.outbox.releaseCalls) != 0 {
-		t.Fatalf("expected ZERO ReleaseClaim calls on the cancel path, got %d", len(h.outbox.releaseCalls))
+	// must never go through ReleaseClaim at all -- there is no longer any
+	// such method on the fake (or the real interface) for this path to call.
+	if len(h.outbox.markExpiredClaimedCalls) != 0 {
+		t.Fatalf("expected ZERO MarkExpiredClaimed calls on the cancel path, got %d", len(h.outbox.markExpiredClaimedCalls))
 	}
 	if len(h.sender.Calls()) != 0 {
 		t.Fatal("expected no send for an ineligible entry")
@@ -584,8 +578,8 @@ func TestRunOnceCancelFencingLostWritesNoAudit(t *testing.T) {
 	}
 	// The single atomic call already failed internally (simulating a lost
 	// race inside the transaction); nothing else should happen.
-	if len(h.outbox.releaseCalls) != 0 {
-		t.Fatal("expected ZERO ReleaseClaim calls on the cancel path even on a fencing conflict")
+	if len(h.outbox.markExpiredClaimedCalls) != 0 {
+		t.Fatal("expected ZERO MarkExpiredClaimed calls on the cancel path even on a fencing conflict")
 	}
 }
 
@@ -785,9 +779,10 @@ func TestRunOnceUnauthorizedAtomicallyTerminalizesAndRevokesInOneCycle(t *testin
 		t.Fatalf("unexpected delivery record: %+v", call.d)
 	}
 	// No ReleaseClaim step at all -- the whole point of using
-	// DeadLetterClaimed directly.
-	if len(h.outbox.releaseCalls) != 0 {
-		t.Fatalf("expected ZERO ReleaseClaim calls on the unauthorized path, got %d", len(h.outbox.releaseCalls))
+	// DeadLetterClaimed directly. There is no such method on the fake (or
+	// the real interface) left for this path to call.
+	if len(h.outbox.markExpiredClaimedCalls) != 0 {
+		t.Fatalf("expected ZERO MarkExpiredClaimed calls on the unauthorized path, got %d", len(h.outbox.markExpiredClaimedCalls))
 	}
 }
 
@@ -820,8 +815,8 @@ func TestRunOnceUnauthorizedIsAlreadyTerminalNoSecondCycleNeeded(t *testing.T) {
 	if len(h.outcomes.unauthorizedCalls) != 1 {
 		t.Fatalf("expected exactly one call total, got %d", len(h.outcomes.unauthorizedCalls))
 	}
-	if len(h.outcomes.canceledCalls) != 0 || len(h.outbox.releaseCalls) != 0 || len(h.outbox.rescheduleCalls) != 0 {
-		t.Fatal("expected no follow-up cancel/release/reschedule calls within the same cycle")
+	if len(h.outcomes.canceledCalls) != 0 || len(h.outbox.markExpiredClaimedCalls) != 0 || len(h.outbox.rescheduleCalls) != 0 {
+		t.Fatal("expected no follow-up cancel/expire/reschedule calls within the same cycle")
 	}
 }
 

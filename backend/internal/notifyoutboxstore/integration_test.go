@@ -1061,6 +1061,61 @@ func TestLiveNotificationOutboxClaimFencingRollsBack(t *testing.T) {
 		t.Fatalf("expected attempt_count to reach exactly max_attempts (1), got %+v", deadJ3)
 	}
 
+	// --- Scenario K (Step 8D-B Part 14C): MarkExpiredClaimed -- wrong token
+	// fails with zero mutation; not-yet-due (now < expires_at) fails with
+	// zero mutation, proving the real "expires_at <= $3" SQL comparison
+	// (which the unit-test fake cannot simulate); correct token at/after
+	// expires_at succeeds, transitions directly to expired, never touches
+	// attempt_count; a terminal row can never be MarkExpiredClaimed'd
+	// either.
+	deviceK := insertFixtureDevice(t, ctx, tx, userA, "https://push.example.invalid/outbox/claim-k")
+	expiresSoonK := base.Add(10 * time.Minute)
+	entryK, err := p.Enqueue(ctx, base, eventMatched, notifydevices.DeviceID(deviceK), identity.UserID(userA), 3, base.Add(time.Minute), expiresSoonK)
+	if err != nil {
+		t.Fatalf("Enqueue (scenario K) failed: %v", err)
+	}
+	claimK, err := p.ClaimSpecific(ctx, base.Add(90*time.Second), entryK.ID, 20*time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimSpecific (K) failed: %v", err)
+	}
+	tokenK := *claimK.ClaimToken
+
+	if _, err := p.MarkExpiredClaimed(ctx, expiresSoonK.Add(time.Second), entryK.ID, wrongToken); err != ErrConflict {
+		t.Fatalf("expected ErrConflict expiring with the wrong token, got %v", err)
+	}
+	stillClaimedK, ok, err := p.Get(ctx, entryK.ID)
+	if err != nil || !ok || !stillClaimedK.Claimed() || *stillClaimedK.ClaimToken != tokenK || stillClaimedK.State != notifyoutbox.StatePending {
+		t.Fatalf("expected the claim to remain untouched after a wrong-token MarkExpiredClaimed attempt, got %+v", stillClaimedK)
+	}
+
+	if _, err := p.MarkExpiredClaimed(ctx, base.Add(91*time.Second), entryK.ID, tokenK); err != ErrConflict {
+		t.Fatalf("expected ErrConflict expiring before the entry's own expires_at, got %v", err)
+	}
+	stillClaimedK2, ok, err := p.Get(ctx, entryK.ID)
+	if err != nil || !ok || !stillClaimedK2.Claimed() || stillClaimedK2.AttemptCount != 0 {
+		t.Fatalf("expected the claim to remain untouched after a not-yet-due MarkExpiredClaimed attempt, got %+v", stillClaimedK2)
+	}
+
+	expiredK, err := p.MarkExpiredClaimed(ctx, expiresSoonK.Add(time.Second), entryK.ID, tokenK)
+	if err != nil {
+		t.Fatalf("expected MarkExpiredClaimed at/after expires_at with the correct token to succeed, got %v", err)
+	}
+	if expiredK.State != notifyoutbox.StateExpired {
+		t.Fatalf("expected state=expired, got %+v", expiredK)
+	}
+	if expiredK.Claimed() {
+		t.Fatal("expected claim_token to be cleared")
+	}
+	if expiredK.AttemptCount != 0 {
+		t.Fatalf("expected MarkExpiredClaimed to never touch attempt_count, got %+v", expiredK)
+	}
+	if expiredK.NextAttemptAt != nil {
+		t.Fatalf("expected next_attempt_at cleared on a terminal transition, got %+v", expiredK.NextAttemptAt)
+	}
+	if _, err := p.MarkExpiredClaimed(ctx, expiresSoonK.Add(2*time.Second), entryK.ID, arbitraryTokenH); err != ErrConflict {
+		t.Fatalf("expected ErrConflict expiring an already-expired entry, got %v", err)
+	}
+
 	cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
 	defer c()
 	if err := tx.Rollback(cleanup); err != nil {
