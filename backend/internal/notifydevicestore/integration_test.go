@@ -916,3 +916,162 @@ func TestLiveNotificationDeviceTestModeRoundTripsRollsBack(t *testing.T) {
 	}
 	rolledBack = true
 }
+
+// TestLiveNotificationDeviceListActiveTestModeRollsBack proves, against the
+// real schema, that ListActiveTestMode (Step 8D-C Part 1) correctly
+// enumerates system-wide (across multiple distinct users), excludes a
+// non-test-mode device, and excludes a revoked device -- the exact
+// isolation guarantee backend/internal/alertnotify's own DEV-only fan-out
+// depends on structurally, not just by convention.
+func TestLiveNotificationDeviceListActiveTestModeRollsBack(t *testing.T) {
+	if os.Getenv("GFR_NOTIFY_DEVICES_LIVE_TEST") != "true" {
+		t.Skip("explicit local rollback-only database opt-in required (set GFR_NOTIFY_DEVICES_LIVE_TEST=true and GFR_DATABASE_URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, closeDB, err := Open(ctx, os.Getenv("GFR_DATABASE_URL"))
+	if err != nil {
+		t.Fatal("local notification-device-store database unavailable")
+	}
+	defer closeDB()
+	pool := db.DB.(*pgxpool.Pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("test transaction failed")
+	}
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = tx.Rollback(cleanup)
+		}
+	}()
+
+	var userA, userB int64
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-listactivetestmode-a@example.com', 'ListActiveTestMode Test A', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userA); err != nil {
+		t.Fatalf("fixture user A insert failed: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO users (normalized_email, display_name, role, status, password_hash, password_updated_at)
+        VALUES ('notifydevicestore-listactivetestmode-b@example.com', 'ListActiveTestMode Test B', 'responder', 'active',
+        '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$aGFzaHZhbHVl', now()) RETURNING id`).Scan(&userB); err != nil {
+		t.Fatalf("fixture user B insert failed: %v", err)
+	}
+
+	p := &Postgres{DB: tx}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	newSub := func(path string) notifydevices.Subscription {
+		raw := make([]byte, 65)
+		raw[0] = 0x04
+		return notifydevices.Subscription{
+			Endpoint: "https://push.example.invalid/listactivetestmode/" + path,
+			Keys: notifydevices.Keys{
+				P256dh: base64.RawURLEncoding.EncodeToString(raw),
+				Auth:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+			},
+		}
+	}
+	flipTestMode := func(id notifydevices.DeviceID) {
+		if _, err := tx.Exec(ctx, `UPDATE notification_devices SET test_mode = true WHERE id = $1`, int64(id)); err != nil {
+			t.Fatalf("fixture test_mode flip failed: %v", err)
+		}
+	}
+
+	// Note: this database is shared across live-test runs and manual
+	// sandbox verification (for example the real browser-registered sandbox
+	// device from Step 8D-B Part 13's own manual end-to-end check), so this
+	// test deliberately never asserts the system-wide result starts empty
+	// or ends at an exact total count -- ListActiveTestMode is intentionally
+	// system-wide, unlike ListActive's own per-user scope, so it can never
+	// assume exclusive ownership of the whole table the way a fresh-random-
+	// user-per-run test can. Every assertion below is therefore
+	// membership-based (does this call's own fixture id appear or not
+	// appear) rather than count-based.
+
+	// userA: one test_mode device (newer), one non-test-mode device, one
+	// revoked test_mode device. userB: one test_mode device (older) --
+	// proving system-wide scope across distinct users.
+	userADeviceTestMode, err := p.Register(ctx, base.Add(2*time.Minute), identity.UserID(userA), newSub("a-test-mode"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (userA test_mode) failed: %v", err)
+	}
+	flipTestMode(userADeviceTestMode.ID)
+
+	userADeviceNonTest, err := p.Register(ctx, base.Add(3*time.Minute), identity.UserID(userA), newSub("a-non-test"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (userA non-test) failed: %v", err)
+	}
+	// Deliberately left test_mode=false (the column's own default).
+
+	userADeviceRevoked, err := p.Register(ctx, base.Add(4*time.Minute), identity.UserID(userA), newSub("a-revoked"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (userA revoked) failed: %v", err)
+	}
+	flipTestMode(userADeviceRevoked.ID)
+	if err := p.Revoke(ctx, base.Add(5*time.Minute), identity.UserID(userA), userADeviceRevoked.ID); err != nil {
+		t.Fatalf("fixture revoke failed: %v", err)
+	}
+
+	userBDeviceTestMode, err := p.Register(ctx, base, identity.UserID(userB), newSub("b-test-mode"), "")
+	if err != nil {
+		t.Fatalf("fixture registration (userB test_mode) failed: %v", err)
+	}
+	flipTestMode(userBDeviceTestMode.ID)
+
+	results, err := p.ListActiveTestMode(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveTestMode failed against a real database: %v", err)
+	}
+
+	// Every returned row must itself be active and test_mode=true,
+	// regardless of how many other (pre-existing, unrelated) rows this
+	// shared database also happens to contain.
+	indexOf := map[notifydevices.DeviceID]int{}
+	for i, r := range results {
+		if !r.TestMode {
+			t.Fatalf("expected every returned row to be test_mode=true, got %+v", r)
+		}
+		if !r.Active() {
+			t.Fatalf("expected every returned row to be active, got %+v", r)
+		}
+		indexOf[r.ID] = i
+	}
+
+	// Membership proofs: this call's own test_mode fixtures for BOTH users
+	// must appear (system-wide scope), while the non-test-mode device and
+	// the revoked device (even though it is also test_mode=true) must never
+	// appear.
+	idxA, okA := indexOf[userADeviceTestMode.ID]
+	if !okA {
+		t.Fatalf("expected userA's own active test_mode device to appear, got %+v", results)
+	}
+	idxB, okB := indexOf[userBDeviceTestMode.ID]
+	if !okB {
+		t.Fatalf("expected userB's own active test_mode device to appear (system-wide scope), got %+v", results)
+	}
+	if _, excluded := indexOf[userADeviceNonTest.ID]; excluded {
+		t.Fatal("expected the non-test-mode device to be excluded")
+	}
+	if _, excluded := indexOf[userADeviceRevoked.ID]; excluded {
+		t.Fatal("expected the revoked device to be excluded even though it is test_mode=true")
+	}
+
+	// Relative deterministic ordering: userA's own device (registered 2
+	// minutes after userB's, within this call's own fixtures) must sort
+	// before userB's, newest-first, regardless of any other rows
+	// interleaved around them.
+	if idxA >= idxB {
+		t.Fatalf("expected userA's newer device (index %d) to sort before userB's older device (index %d)", idxA, idxB)
+	}
+
+	cleanup2, c2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer c2()
+	if err := tx.Rollback(cleanup2); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	rolledBack = true
+}

@@ -1085,3 +1085,111 @@ func TestListActiveRejectsCorruptStoredKeyMaterial(t *testing.T) {
 		t.Fatalf("expected no partial result on failure, got %+v", regs)
 	}
 }
+
+// --- ListActiveTestMode (Step 8D-C Part 1) ---
+
+func TestListActiveTestModeUnconfiguredStoreFailsClosed(t *testing.T) {
+	p := &Postgres{}
+	if _, err := p.ListActiveTestMode(context.Background()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveTestModeQueriesSystemWideAndOrdersDeterministically(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{}}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActiveTestMode(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q.sql, "WHERE revoked_at IS NULL AND test_mode = true") {
+		t.Fatalf("expected the query to be scoped to active, test_mode rows only, got %q", q.sql)
+	}
+	if strings.Contains(q.sql, "user_id = $1") || strings.Contains(q.sql, "WHERE user_id") {
+		t.Fatalf("expected a system-wide scan with no user_id filter at all, got %q", q.sql)
+	}
+	if !strings.Contains(q.sql, "ORDER BY created_at DESC, id DESC") {
+		t.Fatalf("expected deterministic newest-first ordering, got %q", q.sql)
+	}
+	if len(q.args) != 0 {
+		t.Fatalf("expected zero bound arguments (no userID parameter), got %v", q.args)
+	}
+}
+
+func TestListActiveTestModeEmptyResultReturnsEmptySliceNilError(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActiveTestMode(context.Background())
+	if err != nil {
+		t.Fatalf("expected a nil error, got %v", err)
+	}
+	if regs == nil {
+		t.Fatal("expected a non-nil, empty slice, not a nil slice")
+	}
+	if len(regs) != 0 {
+		t.Fatalf("expected zero results, got %d", len(regs))
+	}
+}
+
+func TestListActiveTestModeReturnsMultipleUsersPreservingFieldsAndOrder(t *testing.T) {
+	now := time.Now()
+	later := now.Add(time.Hour)
+	// Two different users' own devices, both test_mode=true -- proving this
+	// method is NOT scoped to one user, unlike ListActive. fakeRows returns
+	// rows in the exact order given; the real ORDER BY correctness itself is
+	// proven by the live integration test.
+	userTwoDevice := fakeRow{id: 2, userID: 2, endpoint: "https://push.example.com/send/user-two",
+		p256dh: rawP256dh(), auth: rawAuth(), createdAt: later, updatedAt: later, testMode: true}
+	userOneDevice := fakeRow{id: 1, userID: 1, endpoint: "https://push.example.com/send/user-one",
+		p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now, testMode: true}
+	q := &fakeQuerier{rows: &fakeRows{remaining: []pgx.Row{userTwoDevice, userOneDevice}}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActiveTestMode(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(regs) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(regs))
+	}
+	if regs[0].UserID != 2 || regs[1].UserID != 1 {
+		t.Fatalf("expected results spanning multiple distinct users, got %+v", regs)
+	}
+	for _, r := range regs {
+		if !r.TestMode {
+			t.Fatalf("expected every returned row to be test_mode=true, got %+v", r)
+		}
+		if !r.Active() {
+			t.Fatalf("expected every returned row to be active, got %+v", r)
+		}
+	}
+}
+
+func TestListActiveTestModeQueryErrorFailsClosed(t *testing.T) {
+	q := &fakeQuerier{queryErr: errors.New("connection reset")}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActiveTestMode(context.Background()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveTestModeRowsErrFailsClosed(t *testing.T) {
+	q := &fakeQuerier{rows: &fakeRows{err: errors.New("connection reset mid-stream")}}
+	p := &Postgres{DB: q}
+	if _, err := p.ListActiveTestMode(context.Background()); err != ErrUnavailable {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestListActiveTestModeRejectsCorruptStoredKeyMaterial(t *testing.T) {
+	now := time.Now()
+	good := fakeRow{id: 1, userID: 1, endpoint: "https://push.example.com/send/a", p256dh: rawP256dh(), auth: rawAuth(), createdAt: now, updatedAt: now, testMode: true}
+	corrupt := fakeRow{id: 2, userID: 1, endpoint: "https://push.example.com/send/b", p256dh: rawP256dh()[:64] /* wrong length */, auth: rawAuth(), createdAt: now, updatedAt: now, testMode: true}
+	q := &fakeQuerier{rows: &fakeRows{remaining: []pgx.Row{good, corrupt}}}
+	p := &Postgres{DB: q}
+	regs, err := p.ListActiveTestMode(context.Background())
+	if err != ErrUnavailable {
+		t.Fatalf("expected corrupt stored key material to fail the whole call closed as ErrUnavailable, got err=%v regs=%+v", err, regs)
+	}
+	if regs != nil {
+		t.Fatalf("expected no partial result on failure, got %+v", regs)
+	}
+}

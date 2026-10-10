@@ -74,6 +74,10 @@ var forbiddenImportSubstrings = []string{
 	// only via notifyoutcome, which imports both -- neither store imports
 	// the other directly, in either direction.
 	"notifydeliverystore",
+	// Step 8D-C Part 1: this package must never acquire a reverse
+	// dependency on the alert->outbox bridge, which depends on IT, never
+	// the other way.
+	"alertnotify",
 	"onesignal",
 	"net/http",
 	"net/smtp",

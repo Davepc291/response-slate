@@ -22,6 +22,11 @@
 // fresh row) and its ON CONFLICT DO UPDATE SET clause never touches it
 // either, so re-registering an existing endpoint can never reset or flip a
 // device's test_mode value as a side effect.
+//
+// ListActiveTestMode is implemented (Step 8D-C Part 1): a system-wide,
+// test_mode=true-only sibling to ListActive's own per-user scope, used by
+// backend/internal/alertnotify to select which devices a DEV-only
+// alert-derived outbox fan-out may ever reach.
 package notifydevicestore
 
 import (
@@ -561,6 +566,45 @@ func (p *Postgres) ListActive(ctx context.Context, userID identity.UserID) ([]no
 
 	rows, err := p.DB.Query(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode
         FROM notification_devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC, id DESC`, int64(userID))
+	if err != nil {
+		return nil, safeDB(err)
+	}
+	defer rows.Close()
+
+	out := []notifydevices.Registration{}
+	for rows.Next() {
+		reg, err := scanRegistration(rows)
+		if err != nil {
+			if errors.Is(err, errCorruptSubscription) {
+				return nil, ErrUnavailable
+			}
+			return nil, safeDB(err)
+		}
+		out = append(out, reg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, safeDB(err)
+	}
+	return out, nil
+}
+
+// ListActiveTestMode returns every currently active (revoked_at IS NULL),
+// test_mode=true registration across EVERY user (Step 8D-C Part 1), unlike
+// ListActive's own per-user scope: the alert->outbox bridge
+// (backend/internal/alertnotify) fans out to every eligible test device
+// system-wide, not one user's own devices. A non-test-mode or revoked
+// device is never returned, regardless of how it was registered. This
+// method takes no userID and performs no ownership check -- it is
+// deliberately a system-wide enumeration, not a per-user lookup. Ordering
+// mirrors ListActive's own newest-first, id-as-tiebreaker convention for
+// deterministic results. ListActive itself is unchanged by this addition.
+func (p *Postgres) ListActiveTestMode(ctx context.Context) ([]notifydevices.Registration, error) {
+	if p == nil || p.DB == nil {
+		return nil, ErrUnavailable
+	}
+
+	rows, err := p.DB.Query(ctx, `SELECT id, user_id, endpoint, p256dh, auth, platform, created_at, updated_at, revoked_at, superseded_by, test_mode
+        FROM notification_devices WHERE revoked_at IS NULL AND test_mode = true ORDER BY created_at DESC, id DESC`)
 	if err != nil {
 		return nil, safeDB(err)
 	}

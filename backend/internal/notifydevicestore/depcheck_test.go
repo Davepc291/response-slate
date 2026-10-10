@@ -49,6 +49,9 @@ var forbiddenImportSubstrings = []string{
 	"internal/alertstore",
 	"notifyoutbox", // guarded in advance: no such package exists yet
 	"notifyrelay",  // guarded in advance: no such package exists yet
+	// Step 8D-C Part 1: this package must never acquire a reverse dependency
+	// on the alert->outbox bridge, which depends on IT, never the other way.
+	"alertnotify",
 	"onesignal",
 	"net/http",
 	"net/smtp",

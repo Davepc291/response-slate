@@ -55,6 +55,10 @@ var forbiddenImportSubstrings = []string{
 	"notifydeliverystore",
 	"notifyworker",
 	"notifyoutcome",
+	// Step 8D-C Part 1: this package must never acquire a reverse
+	// dependency on the alert->outbox bridge, which depends on IT (via the
+	// pure alerts.Event type), never the other way.
+	"alertnotify",
 }
 
 func packageImports(t *testing.T, dir string) map[string][]string {

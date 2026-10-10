@@ -44,6 +44,11 @@ var forbiddenImportSubstrings = []string{
 	"internal/alerts",
 	"internal/alertpipeline",
 	"internal/alertstore",
+	// Step 8D-C Part 1: this package must never acquire a reverse
+	// dependency on the alert->outbox bridge either -- neither needs the
+	// other, and the bridge's own job ends at Enqueue, well before any
+	// worker/claim concern.
+	"alertnotify",
 	"onesignal",
 	"net/smtp",
 	"net/mail",
