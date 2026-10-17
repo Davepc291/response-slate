@@ -57,6 +57,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*v = r.values[i].(bool)
 		case *int64:
 			*v = r.values[i].(int64)
+		case *string:
+			*v = r.values[i].(string)
 		default:
 			return errors.New("fakeRow: unsupported scan destination type")
 		}
@@ -65,6 +67,13 @@ func (r fakeRow) Scan(dest ...any) error {
 }
 
 type fakeConn struct {
+	// currentDatabase is returned for SELECT current_database(). Tests that
+	// need to get past requireDevDatabase must set this to
+	// expectedDevDatabaseName explicitly -- there is no implicit default,
+	// so a test that forgets fails closed with ErrNotDevDatabase rather
+	// than silently passing.
+	currentDatabase string
+
 	userExistsResult bool
 	userExistsErr    error // if set, returned as the QueryRow error (e.g. pgx.ErrNoRows)
 
@@ -81,6 +90,8 @@ type insertCall struct {
 
 func (f *fakeConn) QueryRow(_ context.Context, sqlText string, args ...any) pgx.Row {
 	switch {
+	case strings.Contains(sqlText, "current_database()"):
+		return fakeRow{values: []any{f.currentDatabase}}
 	case strings.Contains(sqlText, "SELECT true FROM users"):
 		if f.userExistsErr != nil {
 			return fakeRow{err: f.userExistsErr}
@@ -123,7 +134,7 @@ func depsFor(stdin string, conn dbConn, connErr error) (Deps, *bytes.Buffer) {
 }
 
 func TestRunImportsFromStdin(t *testing.T) {
-	conn := &fakeConn{userExistsResult: true, nextID: 42}
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, nextID: 42}
 	deps, out := depsFor(validSubscriptionJSON(), conn, nil)
 
 	if err := Run(context.Background(), validConfig(), deps); err != nil {
@@ -141,7 +152,7 @@ func TestRunImportsFromStdin(t *testing.T) {
 }
 
 func TestRunImportsFromFile(t *testing.T) {
-	conn := &fakeConn{userExistsResult: true, nextID: 7}
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, nextID: 7}
 	var out bytes.Buffer
 	deps := Deps{
 		Stdin:   strings.NewReader(""),
@@ -196,7 +207,7 @@ func TestRunRejectsInvalidSubscription(t *testing.T) {
 }
 
 func TestRunRejectsMissingUser(t *testing.T) {
-	conn := &fakeConn{userExistsErr: pgx.ErrNoRows}
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsErr: pgx.ErrNoRows}
 	deps, _ := depsFor(validSubscriptionJSON(), conn, nil)
 
 	err := Run(context.Background(), validConfig(), deps)
@@ -209,7 +220,7 @@ func TestRunRejectsMissingUser(t *testing.T) {
 }
 
 func TestRunRejectsDuplicateActiveEndpoint(t *testing.T) {
-	conn := &fakeConn{userExistsResult: true, insertErr: &pgconn.PgError{Code: "23505"}}
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, insertErr: &pgconn.PgError{Code: "23505"}}
 	deps, _ := depsFor(validSubscriptionJSON(), conn, nil)
 
 	err := Run(context.Background(), validConfig(), deps)
@@ -269,7 +280,7 @@ func TestRunNeverLeaksEndpointOrKeysInOutputOrErrors(t *testing.T) {
 	auth := validAuth()
 	subscription := `{"endpoint":"` + endpoint + `","keys":{"p256dh":"` + p256dh + `","auth":"` + auth + `"}}`
 
-	conn := &fakeConn{userExistsResult: true, nextID: 1}
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, nextID: 1}
 	deps, out := depsFor(subscription, conn, nil)
 
 	if err := Run(context.Background(), validConfig(), deps); err != nil {
@@ -283,7 +294,7 @@ func TestRunNeverLeaksEndpointOrKeysInOutputOrErrors(t *testing.T) {
 
 	// And on a failure path (duplicate endpoint), the error text must also
 	// never contain the secret-shaped values.
-	failConn := &fakeConn{userExistsResult: true, insertErr: &pgconn.PgError{Code: "23505"}}
+	failConn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, insertErr: &pgconn.PgError{Code: "23505"}}
 	failDeps, _ := depsFor(subscription, failConn, nil)
 	err := Run(context.Background(), validConfig(), failDeps)
 	if err == nil {
@@ -293,5 +304,40 @@ func TestRunNeverLeaksEndpointOrKeysInOutputOrErrors(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("error must never contain %q, got %q", secret, err.Error())
 		}
+	}
+}
+
+// TestRunRejectsNonDevDatabaseByIdentity proves that a connection whose own
+// reported current_database() is not exactly expectedDevDatabaseName is
+// refused -- including the specific case this check exists for: a database
+// that passed requireLoopbackDatabase's host-only check (any loopback
+// address, any port) but is not, by name, the development database. No
+// insert is attempted.
+func TestRunRejectsNonDevDatabaseByIdentity(t *testing.T) {
+	for _, name := range []string{"greenwich_fire_responder_prod", "postgres", ""} {
+		t.Run(name, func(t *testing.T) {
+			conn := &fakeConn{currentDatabase: name, userExistsResult: true, nextID: 1}
+			deps, _ := depsFor(validSubscriptionJSON(), conn, nil)
+
+			err := Run(context.Background(), validConfig(), deps)
+			if !errors.Is(err, ErrNotDevDatabase) {
+				t.Fatalf("database %q: expected %v, got %v", name, ErrNotDevDatabase, err)
+			}
+			if len(conn.insertCalls) != 0 {
+				t.Fatalf("database %q: expected no insert attempt against a non-dev database", name)
+			}
+		})
+	}
+}
+
+// TestRunAcceptsExactDevDatabaseName is the positive counterpart: the one
+// name this check must let through, proving the check is not simply
+// vacuous or inverted.
+func TestRunAcceptsExactDevDatabaseName(t *testing.T) {
+	conn := &fakeConn{currentDatabase: expectedDevDatabaseName, userExistsResult: true, nextID: 9}
+	deps, _ := depsFor(validSubscriptionJSON(), conn, nil)
+
+	if err := Run(context.Background(), validConfig(), deps); err != nil {
+		t.Fatalf("unexpected error for the exact expected database name: %v", err)
 	}
 }

@@ -100,7 +100,42 @@ var (
 	// driver error: a connection string or constraint detail could
 	// otherwise leak across this tool's own boundary.
 	ErrDatabaseUnavailable = errors.New("sandbox-device: database unavailable")
+	// ErrNotDevDatabase marks a successful connection to a database that is
+	// not, by its own reported identity, the expected development
+	// database. requireLoopbackDatabase alone cannot provide this
+	// guarantee: this repository's production PostgreSQL (compose.prod.yaml)
+	// also binds to a loopback address (127.0.0.1, its own port 5442), so a
+	// GFR_DATABASE_URL pointed at production loopback would otherwise pass
+	// every check this tool already had. Checked by name, not by port,
+	// specifically so "a loopback production database on another port"
+	// cannot pass.
+	ErrNotDevDatabase = errors.New("sandbox-device: connected database is not the expected development database")
 )
+
+// expectedDevDatabaseName is the one database name this tool will ever
+// operate against. Hardcoded, not configurable by flag or environment
+// variable: an operator pointing this tool at a differently-named database
+// (for example the production greenwich_fire_responder_prod) is exactly the
+// mistake requireDevDatabase exists to catch.
+const expectedDevDatabaseName = "greenwich_fire_responder_dev"
+
+// requireDevDatabase queries the live connection's own reported database
+// name (current_database(), authoritative -- never trusts GFR_DATABASE_URL's
+// own path segment, which could be spoofed or stale) and refuses to proceed
+// unless it is exactly expectedDevDatabaseName. Called only after a
+// successful connect (unlike requireLoopbackDatabase, which is a pure
+// string check performed before any connection is attempted): there is no
+// way to ask a database its own name without first connecting to it.
+func requireDevDatabase(ctx context.Context, conn dbConn) error {
+	var name string
+	if err := conn.QueryRow(ctx, `SELECT current_database()`).Scan(&name); err != nil {
+		return safeDB(err)
+	}
+	if name != expectedDevDatabaseName {
+		return ErrNotDevDatabase
+	}
+	return nil
+}
 
 // requireLoopbackDatabase duplicates bootstrap-admin's own identical check
 // (deliberately, rather than importing a sibling cmd package, which this
@@ -269,6 +304,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		return fmt.Errorf("sandbox-device: connect to database: %w", err)
 	}
 	defer cleanup()
+
+	if err := requireDevDatabase(ctx, conn); err != nil {
+		return err
+	}
 
 	exists, err := userExists(ctx, conn, cfg.UserID)
 	if err != nil {

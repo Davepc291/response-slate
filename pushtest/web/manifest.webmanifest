@@ -1,0 +1,21 @@
+{
+  "name": "GFR Push Test — SANDBOX, NOT LIVE",
+  "short_name": "GFR Push Test",
+  "description": "Internal sandbox for one controlled Web Push delivery test. Not the Greenwich Fire Responder application. No operational data.",
+  "start_url": "/",
+  "scope": "/",
+  "id": "/",
+  "display": "standalone",
+  "background_color": "#101417",
+  "theme_color": "#101417",
+  "orientation": "any",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

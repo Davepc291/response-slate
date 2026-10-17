@@ -59,6 +59,11 @@ type Config struct {
 type Connection interface {
 	Get(ctx context.Context, id notifydevices.DeviceID) (notifydevices.Registration, bool, error)
 	TestMode(ctx context.Context, id notifydevices.DeviceID) (bool, error)
+	// CurrentDatabase reports the connection's own live database name
+	// (SQL current_database()), so requireDevDatabase can refuse to
+	// proceed against anything but the expected development database --
+	// authoritative, never trusting GFR_DATABASE_URL's own path segment.
+	CurrentDatabase(ctx context.Context) (string, error)
 }
 
 // Connector opens (and returns a cleanup func for) the read-only database
@@ -111,6 +116,14 @@ var (
 	// ErrDatabaseUnavailable marks a read failure. Never wraps a raw driver
 	// error.
 	ErrDatabaseUnavailable = errors.New("sandbox-push: database unavailable")
+	// ErrNotDevDatabase marks a successful connection to a database that is
+	// not, by its own reported identity, the expected development
+	// database. Mirrors sandbox-device's own identical check: production
+	// PostgreSQL (compose.prod.yaml) also binds to a loopback address, on
+	// its own port, so a loopback-only host check alone cannot distinguish
+	// it from the real development database -- only the database's own
+	// name can.
+	ErrNotDevDatabase = errors.New("sandbox-push: connected database is not the expected development database")
 
 	// ErrOutcomeTemporaryFailure, ErrOutcomePermanentFailure, and
 	// ErrOutcomeUnauthorized mark a send that completed (no network/config
@@ -124,16 +137,36 @@ var (
 	ErrOutcomeUnauthorized     = errors.New("sandbox-push: outcome was unauthorized")
 )
 
+// expectedDevDatabaseName is the one database name this tool will ever
+// operate against. Hardcoded, not configurable by flag or environment
+// variable, mirroring sandbox-device's own identical constant exactly.
+const expectedDevDatabaseName = "greenwich_fire_responder_dev"
+
+// requireDevDatabase queries the live connection's own reported database
+// name and refuses to proceed unless it is exactly expectedDevDatabaseName.
+// Mirrors sandbox-device's own identical function (duplicated, not shared,
+// per this repository's established convention for these narrow guards).
+func requireDevDatabase(ctx context.Context, conn Connection) error {
+	name, err := conn.CurrentDatabase(ctx)
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	if name != expectedDevDatabaseName {
+		return ErrNotDevDatabase
+	}
+	return nil
+}
+
 // Run performs the mandatory pre-send checks in the locked order --
 // confirmation, relay enabled, env exactly dev, valid VAPID/options, device
-// id positive, device exists, device active, device test_mode, request
-// validates -- then calls Sender.Send exactly once, with no retry. Every
-// database access it performs is a read (Get, TestMode); it never inserts,
-// updates, deletes, revokes a device, or writes anything to the outbox or
-// delivery-audit tables. Every line printed to deps.Stdout is prefixed by a
-// "SANDBOX TRANSPORT TEST -- NOT A REAL ALERT" banner and never contains the
-// endpoint, subscription keys, VAPID keys, VAPID subject, payload title/
-// body/url, or a database connection string.
+// id positive, database identity, device exists, device active, device
+// test_mode, request validates -- then calls Sender.Send exactly once, with
+// no retry. Every database access it performs is a read (Get, TestMode); it
+// never inserts, updates, deletes, revokes a device, or writes anything to
+// the outbox or delivery-audit tables. Every line printed to deps.Stdout is
+// prefixed by a "SANDBOX TRANSPORT TEST -- NOT A REAL ALERT" banner and
+// never contains the endpoint, subscription keys, VAPID keys, VAPID
+// subject, payload title/body/url, or a database connection string.
 func Run(ctx context.Context, cfg Config, deps Deps) error {
 	if !cfg.Confirmed {
 		return ErrNotConfirmed
@@ -162,6 +195,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		return fmt.Errorf("sandbox-push: connect to database: %w", err)
 	}
 	defer cleanup()
+
+	if err := requireDevDatabase(ctx, conn); err != nil {
+		return err
+	}
 
 	deviceID := notifydevices.DeviceID(cfg.DeviceID)
 	registration, ok, err := conn.Get(ctx, deviceID)

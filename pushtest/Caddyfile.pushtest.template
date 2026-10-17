@@ -1,0 +1,72 @@
+# pushtest.gfrapp.com — iPhone Push Test preparation, isolated sandbox
+# origin (Option B from Part 1's design).
+#
+# TEMPLATE ONLY. This file is NOT applied to any running Caddy instance and
+# is not referenced by Caddyfile.production. It must not be copied in, and
+# DNS for pushtest.gfrapp.com must not be created, until both are
+# explicitly authorized in a future, separate part. When that happens, this
+# block is additive: paste it in ALONGSIDE the existing app.gfrapp.com site
+# block in ops/windows/caddy/Caddyfile.production (or a separately included
+# file) -- it must never replace, merge into, or otherwise modify that
+# block. The production app, API, and database are untouched by this file
+# existing on disk; nothing reads it today.
+#
+# Topology this describes, once (and only once) applied:
+#
+#   Internet ──443──> Caddy, same instance already serving app.gfrapp.com
+#                        │
+#                        ├─ /submit ──> pushtest-receiver (127.0.0.1:8099,
+#                        │               loopback only, same-origin so no
+#                        │               CORS or mixed-content handling is
+#                        │               needed)
+#                        └─ /*       ──> static files under pushtest/web,
+#                                        served directly, no build step
+#
+# Prerequisites before this template is ever copied in for real:
+#   - A DNS A/AAAA record for pushtest.gfrapp.com, pointed at this same
+#     host (Cloudflare, per the existing convention) -- not created by this
+#     part.
+#   - cmd/pushtest-receiver running locally (see pushtest/README.md),
+#     started with its own GFR_PUSHTEST_RECEIVER_TOKEN.
+#   - pushtest/web/config.js created locally from config.example.js, with
+#     a real dev-only VAPID public key -- the receiver token is no longer
+#     stored in any file (Part 2B correction): it is typed by hand into
+#     the page itself at test time, never committed, never served.
+#
+# {$GFR_PUSHTEST_FRONTEND_ROOT} setup (corrected in Part 2B -- this was
+# previously an undefined placeholder with no instructions at all):
+# Caddy only ever sees an env var if the process that starts/reloads it
+# has that var set first -- exactly how ops/windows/caddy/Run-Caddy.ps1
+# sets $env:GFR_FRONTEND_ROOT (Run-Caddy.ps1:20) immediately before
+# launching caddy.exe as its child process. This template does not modify
+# Run-Caddy.ps1 (a production runtime script, out of scope for this
+# preparation) and ships no code to set this variable permanently. When
+# this template is actually applied, whoever does so must, in the exact
+# same PowerShell session, before running `caddy run`/`caddy reload`:
+#
+#   $env:GFR_PUSHTEST_FRONTEND_ROOT = "<absolute path to pushtest/web>"
+#
+# If this ever becomes a longer-lived addition rather than a one-time
+# test, the durable fix is one line in Run-Caddy.ps1 mirroring its own
+# existing GFR_FRONTEND_ROOT line -- a separate, explicitly authorized
+# change, not part of this template.
+
+pushtest.gfrapp.com {
+	encode gzip
+
+	handle /submit {
+		reverse_proxy 127.0.0.1:8099
+	}
+
+	handle {
+		root * {$GFR_PUSHTEST_FRONTEND_ROOT}
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

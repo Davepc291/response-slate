@@ -140,6 +140,14 @@ func (c postgresConnection) TestMode(ctx context.Context, id notifydevices.Devic
 	return testMode, nil
 }
 
+func (c postgresConnection) CurrentDatabase(ctx context.Context) (string, error) {
+	var name string
+	if err := c.store.DB.QueryRow(ctx, `SELECT current_database()`).Scan(&name); err != nil {
+		return "", ErrDatabaseUnavailable
+	}
+	return name, nil
+}
+
 // realConnector opens a loopback-only connection via notifydevicestore.Open,
 // which independently enforces its own host allowlist.
 func realConnector(ctx context.Context, databaseURL string) (Connection, func(), error) {

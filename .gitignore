@@ -12,6 +12,11 @@ secrets/
 *.p12
 *.pfx
 
+# `go build ./cmd/<tool>/...` on Windows writes a binary into the current
+# directory when the pattern resolves to exactly one main package; never
+# intentional to commit one of these.
+*.exe
+
 # Local database files and backups.
 postgres_data/
 pgdata/
@@ -44,3 +49,12 @@ dataset-exports/
 recordings/
 *.mp3
 *.wav
+
+# iPhone Push Test preparation (pushtest/): the filled-in config carries a
+# dev-only VAPID public key and the receiver's bearer token, and the
+# received subscription itself carries endpoint/p256dh/auth -- none of this
+# is ever committed. Only pushtest/web/config.example.js (placeholders
+# only) is tracked.
+pushtest/web/config.js
+pushtest/*.subscription.json
+pushtest/received/

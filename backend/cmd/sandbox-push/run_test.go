@@ -60,6 +60,13 @@ func validConfig() Config {
 
 // fakeConnection is an in-memory Connection fake.
 type fakeConnection struct {
+	// currentDatabase is returned by CurrentDatabase. Tests that need to
+	// get past requireDevDatabase must set this to expectedDevDatabaseName
+	// explicitly -- no implicit default, so a forgotten field fails closed
+	// with ErrNotDevDatabase rather than silently passing.
+	currentDatabase string
+	cdErr           error
+
 	registration notifydevices.Registration
 	found        bool
 	getErr       error
@@ -69,6 +76,13 @@ type fakeConnection struct {
 
 	getCalls      int
 	testModeCalls int
+}
+
+func (f *fakeConnection) CurrentDatabase(context.Context) (string, error) {
+	if f.cdErr != nil {
+		return "", f.cdErr
+	}
+	return f.currentDatabase, nil
 }
 
 func (f *fakeConnection) Get(context.Context, notifydevices.DeviceID) (notifydevices.Registration, bool, error) {
@@ -110,7 +124,7 @@ func depsFor(conn Connection, sender *notifyrelay.FakeSender) (Deps, *bytes.Buff
 }
 
 func readyConnection() *fakeConnection {
-	return &fakeConnection{registration: validRegistration(), found: true, testMode: true}
+	return &fakeConnection{currentDatabase: expectedDevDatabaseName, registration: validRegistration(), found: true, testMode: true}
 }
 
 func TestRunRequiresConfirmation(t *testing.T) {
@@ -195,7 +209,7 @@ func TestRunRejectsInvalidDeviceID(t *testing.T) {
 
 func TestRunRejectsMissingDevice(t *testing.T) {
 	sender := notifyrelay.NewFakeSender()
-	conn := &fakeConnection{found: false}
+	conn := &fakeConnection{currentDatabase: expectedDevDatabaseName, found: false}
 	deps, _ := depsFor(conn, sender)
 
 	err := Run(context.Background(), validConfig(), deps)
@@ -212,7 +226,7 @@ func TestRunRejectsRevokedDevice(t *testing.T) {
 	revokedAt := time.Now()
 	reg := validRegistration()
 	reg.RevokedAt = &revokedAt
-	conn := &fakeConnection{registration: reg, found: true, testMode: true}
+	conn := &fakeConnection{currentDatabase: expectedDevDatabaseName, registration: reg, found: true, testMode: true}
 	deps, _ := depsFor(conn, sender)
 
 	err := Run(context.Background(), validConfig(), deps)
@@ -229,7 +243,7 @@ func TestRunRejectsRevokedDevice(t *testing.T) {
 
 func TestRunRejectsNonTestModeDevice(t *testing.T) {
 	sender := notifyrelay.NewFakeSender()
-	conn := &fakeConnection{registration: validRegistration(), found: true, testMode: false}
+	conn := &fakeConnection{currentDatabase: expectedDevDatabaseName, registration: validRegistration(), found: true, testMode: false}
 	deps, _ := depsFor(conn, sender)
 
 	err := Run(context.Background(), validConfig(), deps)
@@ -351,5 +365,41 @@ func TestRunNeverLeaksSecretsInOutputOrErrors(t *testing.T) {
 		if strings.Contains(out.String(), secret) {
 			t.Fatalf("output must never contain %q:\n%s", secret, out.String())
 		}
+	}
+}
+
+// TestRunRejectsNonDevDatabaseByIdentity proves that a connection whose own
+// reported CurrentDatabase is not exactly expectedDevDatabaseName is
+// refused before any device lookup -- including the specific case this
+// check exists for: a database that would pass a loopback-only host check
+// (any port) but is not, by name, the development database.
+func TestRunRejectsNonDevDatabaseByIdentity(t *testing.T) {
+	for _, name := range []string{"greenwich_fire_responder_prod", "postgres", ""} {
+		t.Run(name, func(t *testing.T) {
+			sender := notifyrelay.NewFakeSender()
+			conn := &fakeConnection{currentDatabase: name, registration: validRegistration(), found: true, testMode: true}
+			deps, _ := depsFor(conn, sender)
+
+			err := Run(context.Background(), validConfig(), deps)
+			if !errors.Is(err, ErrNotDevDatabase) {
+				t.Fatalf("database %q: expected %v, got %v", name, ErrNotDevDatabase, err)
+			}
+			if conn.getCalls != 0 {
+				t.Fatalf("database %q: expected no device lookup against a non-dev database", name)
+			}
+			if len(sender.Calls()) != 0 {
+				t.Fatalf("database %q: expected zero Send calls", name)
+			}
+		})
+	}
+}
+
+// TestRunAcceptsExactDevDatabaseName is the positive counterpart.
+func TestRunAcceptsExactDevDatabaseName(t *testing.T) {
+	sender := notifyrelay.NewFakeSender()
+	deps, _ := depsFor(readyConnection(), sender)
+
+	if err := Run(context.Background(), validConfig(), deps); err != nil {
+		t.Fatalf("unexpected error for the exact expected database name: %v", err)
 	}
 }
