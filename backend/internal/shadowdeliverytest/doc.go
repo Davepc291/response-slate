@@ -16,12 +16,25 @@
 // ("_test"-suffixed) test package placed inside one of those directories
 // would still be scanned and would still fail that directory's own guard.
 //
-// Real eligibility evaluation (notifypreferences.Evaluator wired to
-// identitystore/notifydevicestore/notifyconsentstore/notifyprefsstore) is
-// explicitly NOT exercised here: this package's own test uses a fixed,
-// always-eligible fake evaluator instead, exactly mirroring every existing
-// notifyworker test (backend/internal/notifyworker/notifyworker_test.go's own
-// fakeEvaluator). Consent, preferences, and quiet-hours therefore remain
-// unproven end-to-end after this part -- see the test's own doc comment for
-// the full list of what is, and is not, proven.
+// Part 2 (integration_test.go) exercises this chain with a fixed,
+// always-eligible fake evaluator instead of real eligibility evaluation,
+// exactly mirroring every existing notifyworker test (backend/internal/
+// notifyworker/notifyworker_test.go's own fakeEvaluator) -- see that file's
+// own doc comment for exactly what it does, and does not, prove.
+//
+// Step 8D-C Part 3 (eligibility_integration_test.go) closes that gap: a
+// real notifypreferences.Evaluator, wired to the real identitystore/
+// notifydevicestore/notifyconsentstore/notifyprefsstore stores, is
+// constructed and exercised both directly (every Reason value, against
+// real persisted rows) and plugged into a real notifyworker.Worker
+// (eligible -> send, consent-revoked -> cancel, quiet-hours -> defer).
+// Consent, preferences, and quiet-hours are therefore proven end-to-end by
+// that file -- but one gap remains, deliberately not closed by either part:
+// nothing re-checks eligibility between Evaluate returning Eligible=true
+// and the actual Sender.Send call that follows it. A consent revocation or
+// preference change landing in that window does not stop the send, and a
+// successful first-attempt send has no later retry to re-evaluate against.
+// See eligibility_integration_test.go's own top doc comment for the full
+// account of what is, and is not, proven, and why that residual race is a
+// real production property, not a test gap this package can close.
 package shadowdeliverytest

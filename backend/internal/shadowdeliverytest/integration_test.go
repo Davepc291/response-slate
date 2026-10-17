@@ -26,10 +26,13 @@ package shadowdeliverytest
 // (fakeEvaluator below), exactly mirroring every existing notifyworker test.
 // notifypreferences.Evaluator -- the real implementation, which reads
 // identitystore/notifydevicestore/notifyconsentstore/notifyprefsstore fresh
-// on every call -- is never constructed or exercised here. Consent,
-// preferences, and quiet-hours therefore remain unproven end-to-end after
-// this part; see backend/internal/notifypreferences's own unit tests for
-// that package's independent correctness proof.
+// on every call -- is never constructed or exercised in THIS file. That
+// remains true of this file specifically and is unchanged by Step 8D-C
+// Part 3: see the sibling eligibility_integration_test.go (same package),
+// which wires the real Evaluator into both a direct-call table of every
+// Reason value and a real notifyworker.Worker, closing exactly this gap --
+// and documents, but does not close, one further residual gap of its own
+// (the check-to-send race; see that file's and doc.go's own comments).
 //
 // A note on claim scoping (Step 8D-C Part 2 design-lock Correction 1):
 // notifyworker.Worker's public API (Run/RunOnce) offers no way to scope a
